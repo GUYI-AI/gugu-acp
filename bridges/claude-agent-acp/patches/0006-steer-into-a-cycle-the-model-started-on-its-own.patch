@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 14:13:43 +0800
+Subject: [PATCH] gugu: steer into a cycle the model started on its own
+
+Why: steer() counted a turn as running only when `turnQueue` held an
+unsettled host turn. A cycle the model starts on its own (a
+task-notification followup when a background command finishes, a peer
+message; see AUTONOMOUS_RESULT_ORIGINS) has no Turn, so a steer during it
+answered `promptRequired / noRunningTurn` while the cycle was still running.
+Gugu then sent the message as a fresh prompt, which the CLI queued behind
+the cycle: "send now" became "send when it is done" (gugu#7087).
+
+The CLI itself accepts the message: pushed onto the input during such a
+cycle, it is folded into it, and the cycle's result keeps its autonomous
+origin and names the message in `user_message_uuids` (read on Claude
+2.1.296: steer 3 s into a task-notification cycle -> `injected`, result
+`origin.kind: "task-notification"`, the model's reply honours the steer, the
+next prompt ends normally). The bridge now tracks that state as
+`autonomousCycle`: set when the SDK leaves `idle` while no host turn is
+queued, cleared at the next `idle` and when a host turn activates. While it
+is set, steer() pushes the message as it does for a host turn, without Turn
+bookkeeping (there is no Turn to settle). After a user turn the CLI reports
+`running -> idle` even with a background command still running, so the
+quiet gap before the notification is not mistaken for a cycle; the case
+where it withholds `idle` (background subagents) keeps the user turn held
+open, which the existing in-flight path already covers.
+
+Upstream: none yet.
+
+Drop when: upstream steer() injects into autonomous cycles.
+---
+ src/acp-agent.ts            | 43 +++++++++++++++++++------
+ src/tests/acp-agent.test.ts | 62 +++++++++++++++++++++++++++++++++++++
+ 2 files changed, 96 insertions(+), 9 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 744c6bd..5f831c0 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -1126,6 +1126,14 @@ export type Session = {
+    *  yields none, and a pre-counted debt that never drains would mask one
+    *  future issue-#825 detection. */
+   lastSessionState?: "idle" | "running" | "requires_action";
++  /** The SDK is running a cycle the model started on its own (a
++   *  task-notification followup, a peer message; see
++   *  AUTONOMOUS_RESULT_ORIGINS): it left `idle` while no host turn was queued.
++   *  Such a cycle has no Turn, yet `steer()` can still inject into it — the
++   *  CLI folds the message into the running cycle, whose result then names
++   *  it in `user_message_uuids` and keeps its autonomous origin (CLI
++   *  2.1.296). Cleared at the next `idle` and when a host turn activates. */
++  autonomousCycle?: boolean;
+   /** How many trailing `session_state_changed: idle` messages are already
+    *  accounted for: every result is followed by one (user-turn results that
+    *  terminate a turn — settle, reject, or orphan skip — and autonomous
+@@ -3398,6 +3406,9 @@ export class ClaudeAcpAgent {
+    *  own and the steered message runs as a second one, so the turn is marked
+    *  (`Turn.steeredEchoes`) to settle only once a result answers the steer.
+    *
++   *  A cycle the model started on its own (`autonomousCycle`) counts as
++   *  running: the message is pushed the same way, without Turn bookkeeping.
++   *
+    *  When the session is idle, the opt-in path returns `promptRequired` WITHOUT
+    *  calling `prompt()`, pushing SDK input, or mutating `turnQueue`: the content
+    *  stays Host-owned so the Host can submit it through a standard
+@@ -3421,7 +3432,10 @@ export class ClaudeAcpAgent {
+     // and the active-path push below stay in one synchronous section so the
+     // turn cannot settle in the gap between deciding to inject and enqueueing.
+     const turnInFlight = (session.turnQueue ?? []).find((turn) => !turn.settled);
+-    if (!turnInFlight) {
++    // A cycle the model started on its own is running too: inject into it
++    // rather than leave the message waiting behind it (see autonomousCycle).
++    // It has no Turn to mark, and its result settles nothing.
++    if (!turnInFlight && !session.autonomousCycle) {
+       const promptRequest: PromptRequest = {
+         sessionId,
+         prompt: params.prompt,
+@@ -3466,14 +3480,16 @@ export class ClaudeAcpAgent {
+     // check: the interrupt can have the CLI finalizing the aborted cycle by the
+     // time the consumer next runs, and an unmarked result would settle the turn
+     // (see Turn.steeredEchoes).
+-    (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
+-    (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
+-    // A turn already held for background subagents has a recorded outcome the
+-    // steer supersedes: move it into the steer lane so one lane owns settlement.
+-    // The idle handler re-applies the hold through the subagent gate.
+-    if (turnInFlight.deferredSettle !== undefined) {
+-      turnInFlight.steeredSettle = turnInFlight.deferredSettle;
+-      turnInFlight.deferredSettle = undefined;
++    if (turnInFlight) {
++      (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
++      (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
++      // A turn already held for background subagents has a recorded outcome the
++      // steer supersedes: move it into the steer lane so one lane owns settlement.
++      // The idle handler re-applies the hold through the subagent gate.
++      if (turnInFlight.deferredSettle !== undefined) {
++        turnInFlight.steeredSettle = turnInFlight.deferredSettle;
++        turnInFlight.deferredSettle = undefined;
++      }
+     }
+     session.input.push(userMessage);
+     const firstText = params.prompt[0]?.type === "text" ? params.prompt[0].text : "";
+@@ -3852,6 +3868,7 @@ export class ClaudeAcpAgent {
+      *  result isn't wrongly skipped. */
+     const activateTurn = (turn: Turn) => {
+       session.activeTurn = turn;
++      session.autonomousCycle = false;
+       session.cancelled = false;
+       compaction.resume();
+       ensureUsageMarkdown(turn);
+@@ -4702,6 +4719,14 @@ export class ClaudeAcpAgent {
+               case "session_state_changed": {
+                 const previousState = session.lastSessionState;
+                 session.lastSessionState = message.state;
++                if (message.state === "idle") {
++                  session.autonomousCycle = false;
++                } else if (
++                  previousState === "idle" &&
++                  !(session.turnQueue ?? []).some((turn) => !turn.settled)
++                ) {
++                  session.autonomousCycle = true;
++                }
+                 if (
+                   message.state === "running" &&
+                   previousState !== "running" &&
+diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
+index 20bd39c..40d5fcb 100644
+--- a/src/tests/acp-agent.test.ts
++++ b/src/tests/acp-agent.test.ts
+@@ -18397,6 +18397,68 @@ describe("turn steering (_session/steering)", () => {
+     expect(captured[0].priority).toBe("next");
+   });
+ 
++  it("injects into a cycle the model started on its own, and only while it runs", async () => {
++    const timeline: string[] = [];
++    const agent = new ClaudeAcpAgent(timelineClient(timeline), { log: () => {}, error: () => {} });
++    const captured: any[] = [];
++    let notify!: () => void;
++    const notified = new Promise<void>((resolve) => (notify = resolve));
++    let autonomousRunning = false;
++    injectGeneratorSession(agent, (input) => {
++      async function* messageGenerator() {
++        const iter = input[Symbol.asyncIterator]();
++        const u1 = await iter.next();
++        yield userEcho(u1.value);
++        yield { ...createResultMessage(), origin: { kind: "human" } };
++        yield idleMessage();
++        // A background task finishes: the CLI runs a task-notification cycle
++        // with no host turn queued (as read on CLI 2.1.296).
++        await notified;
++        yield { type: "system", subtype: "session_state_changed", state: "running" };
++        autonomousRunning = true;
++        const steered = await iter.next();
++        captured.push(steered.value);
++        yield userEcho(steered.value);
++        yield createAssistantText("finished steered");
++        yield {
++          ...createResultMessage(),
++          origin: { kind: "task-notification" },
++          user_message_uuids: [steered.value.uuid],
++        };
++        yield idleMessage();
++        await iter.next(); // the session stays open
++      }
++      return messageGenerator();
++    });
++
++    await expect(
++      agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "start" }] }),
++    ).resolves.toEqual(expect.objectContaining({ stopReason: "end_turn" }));
++    notify();
++    await waitFor(() => autonomousRunning);
++
++    const steer = (text: string) =>
++      agent.steer({
++        sessionId: "test-session",
++        prompt: [{ type: "text", text }],
++        _meta: { steering: { idleBehavior: "promptRequired", delivery: "next" } },
++      });
++    await expect(steer("also say steered")).resolves.toEqual({ outcome: "injected" });
++    expect(agent.sessions["test-session"].turnQueue).toHaveLength(0);
++    await waitFor(() => timeline.includes("finished steered"));
++    expect(captured).toHaveLength(1);
++    expect(captured[0].priority).toBe("next");
++    expect(JSON.stringify(captured[0].message.content)).toContain("also say steered");
++
++    // That cycle is over: the content stays Host-owned again.
++    await waitFor(() => agent.sessions["test-session"].lastSessionState === "idle");
++    await expect(steer("too late")).resolves.toEqual({
++      outcome: "promptRequired",
++      reason: "noRunningTurn",
++    });
++    expect(captured).toHaveLength(1);
++  });
++
+   it.each([
+     {
+       name: "a permission request",
+-- 
+2.43.0
+

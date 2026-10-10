@@ -1,6 +1,6 @@
 {
   "package": "@gugu-acp/claude-agent-acp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "upstream": {
     "repo": "https://github.com/agentclientprotocol/claude-agent-acp",
     "package": "@agentclientprotocol/claude-agent-acp",

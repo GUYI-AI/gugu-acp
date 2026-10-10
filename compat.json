@@ -44,14 +44,19 @@
           ]
         },
         {
-          "version": "1.2.0",
+          "version": "1.2.1",
           "upstreamTag": "v0.84.0",
           "cliFrom": "2.1.286",
           "verified": [
             {
               "cli": "2.1.286",
-              "at": "2026-09-30",
-              "how": "abc (CI, upstream v0.84.0)"
+              "at": "2026-10-10",
+              "how": "abc + steer during a task-notification cycle (ThinkPad, build = patches on v0.84.0, model through the CLI's own login)"
+            },
+            {
+              "cli": "2.1.296",
+              "at": "2026-10-10",
+              "how": "abc + steer during a task-notification cycle (ThinkPad, build = patches on v0.84.0, model through the CLI's own login)"
             }
           ]
         }
