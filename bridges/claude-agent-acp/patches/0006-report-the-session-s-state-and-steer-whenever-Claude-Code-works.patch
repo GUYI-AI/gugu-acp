@@ -1,0 +1,271 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 10 Oct 2026 15:37:05 +0800
+Subject: [PATCH] gugu: report the session's state, and steer whenever Claude
+ Code works
+
+Why: a client needs to know whether Claude Code is working, whoever started the
+work. The bridge only knows its host turns: work Claude Code starts on its own (a
+task-notification followup when a background command finishes, a peer message)
+has no Turn, so steer() answered promptRequired/noRunningTurn while Claude Code
+was still running, and a client that infers "running" from open prompt requests
+is blind to such work (gugu#7087). Claude Code itself reports its state
+(`session_state_changed`, enabled by CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS):
+read on CLI 2.1.296 it is running/idle/requires_action at the right moments for
+a plain prompt, a background subagent (running until the notification reply),
+a background command's notification cycle, a permission wait and a cancel.
+
+- On every change of that state, ACP v2's `state_update` session update
+  (`running` / `requires_action` / `idle`, `stopReason: "cancelled"` after a
+  cancel) to a client that declares `clientCapabilities._meta["session-state"]`;
+  the marker `agentCapabilities._meta.sessionState` goes to that client only, so
+  other clients' traffic is unchanged. The ACP v2 RFD suggests a capability on
+  v1 to try the prompt lifecycle before v2 is stable. The variant is outside the
+  v1 union, so it is sent like the draft subagent updates
+  (asSdkSessionNotification) and only to a client that asked for it.
+- steer() injects whenever Claude Code is running or waiting on the user, not
+  only while a host turn is unsettled. Without a Turn there is no bookkeeping:
+  Claude Code folds the message into its work, and that work's result keeps its
+  autonomous origin and names the message in `user_message_uuids`.
+
+Upstream: none yet (agentclientprotocol/claude-agent-acp's experimental v2
+surface reports state from prompt turns only).
+
+Drop when: upstream reports Claude Code's own state to v1 clients (or Gugu
+speaks ACP v2 and upstream's state_update follows Claude Code's state).
+---
+ src/acp-agent.ts            |  64 ++++++++++++++++++---
+ src/tests/acp-agent.test.ts | 110 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 165 insertions(+), 9 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index dcfce5d..626beea 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -1335,6 +1335,18 @@ export type Session = {
+  *  Exception: a result from one of these origins that names a pending prompt
+  *  in `user_message_uuids` consumed that folded prompt and takes the user
+  *  lane (see the result handler). */
++/** The session's state as Claude Code reports it (`session_state_changed`):
++ *  `running`, `requires_action` (waiting on a permission or a question) or
++ *  `idle`, on every change, whoever started the work, so it also covers work
++ *  Claude Code starts on its own, which no `session/prompt` answers. Sent as
++ *  ACP v2's `state_update` session update (the draft prompt lifecycle), to a v1
++ *  client that declares {@link SESSION_STATE_CAPABILITY} in
++ *  `clientCapabilities._meta`: the v1 schema has no such variant, so other
++ *  clients would reject it. An `idle` carries `stopReason: "cancelled"` after a
++ *  cancel and no stop reason otherwise; how a prompt ended still answers that
++ *  prompt. */
++export const SESSION_STATE_CAPABILITY = "session-state";
++
+ const AUTONOMOUS_RESULT_ORIGINS: ReadonlySet<SDKMessageOrigin["kind"]> = new Set([
+   "task-notification",
+   "peer",
+@@ -2759,6 +2771,11 @@ export class ClaudeAcpAgent {
+           // never a status payload. The state itself travels on
+           // `_auth/status_update`; there is nothing for a client to ask for.
+           authStatus: authStatusCapability(),
++          // Marker for the `state_update` session update, only for a client that declares
++          // `clientCapabilities._meta["session-state"]`.
++          ...(request.clientCapabilities?._meta?.[SESSION_STATE_CAPABILITY] === true
++            ? { sessionState: {} }
++            : {}),
+         },
+         promptCapabilities: {
+           image: true,
+@@ -3825,6 +3842,10 @@ export class ClaudeAcpAgent {
+    *  way the turn is marked (`Turn.steeredEchoes`) to settle only once a result
+    *  answers the steer.
+    *
++   *  Claude Code working on something it started itself (a task-notification
++   *  followup) counts as running too: the message is pushed the same way,
++   *  without Turn bookkeeping, and Claude Code folds it into that work.
++   *
+    *  When the session is idle, the opt-in path returns `promptRequired` WITHOUT
+    *  calling `prompt()`, pushing SDK input, or mutating `turnQueue`: the content
+    *  stays Host-owned so the Host can submit it through a standard
+@@ -3848,7 +3869,11 @@ export class ClaudeAcpAgent {
+     // and the active-path push below stay in one synchronous section so the
+     // turn cannot settle in the gap between deciding to inject and enqueueing.
+     const turnInFlight = (session.turnQueue ?? []).find((turn) => !turn.settled);
+-    if (!turnInFlight) {
++    // Claude Code is working, whoever started it: a cycle it started on its own
++    // (a task-notification followup) has no Turn, and takes the message too.
++    const working =
++      session.lastSessionState === "running" || session.lastSessionState === "requires_action";
++    if (!turnInFlight && !working) {
+       const promptRequest: PromptRequest = {
+         sessionId,
+         prompt: params.prompt,
+@@ -3893,14 +3918,16 @@ export class ClaudeAcpAgent {
+     // check: the interrupt can have the CLI finalizing the aborted cycle by the
+     // time the consumer next runs, and an unmarked result would settle the turn
+     // (see Turn.steeredEchoes).
+-    (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
+-    (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
+-    // A turn already held for background subagents has a recorded outcome the
+-    // steer supersedes: move it into the steer lane so one lane owns settlement.
+-    // The idle handler re-applies the hold through the subagent gate.
+-    if (turnInFlight.deferredSettle !== undefined) {
+-      turnInFlight.steeredSettle = turnInFlight.deferredSettle;
+-      turnInFlight.deferredSettle = undefined;
++    if (turnInFlight) {
++      (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
++      (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
++      // A turn already held for background subagents has a recorded outcome the
++      // steer supersedes: move it into the steer lane so one lane owns settlement.
++      // The idle handler re-applies the hold through the subagent gate.
++      if (turnInFlight.deferredSettle !== undefined) {
++        turnInFlight.steeredSettle = turnInFlight.deferredSettle;
++        turnInFlight.deferredSettle = undefined;
++      }
+     }
+     session.input.push(userMessage);
+     const firstText = params.prompt[0]?.type === "text" ? params.prompt[0].text : "";
+@@ -5311,6 +5338,25 @@ export class ClaudeAcpAgent {
+               case "session_state_changed": {
+                 const previousState = session.lastSessionState;
+                 session.lastSessionState = message.state;
++                // The session's state as Claude Code reports it, whoever started
++                // the work (see SESSION_STATE_CAPABILITY).
++                if (
++                  previousState !== message.state &&
++                  this.clientCapabilities?._meta?.[SESSION_STATE_CAPABILITY] === true
++                ) {
++                  // ACP v2's `state_update`, outside the v1 union (like the
++                  // draft subagent updates, see asSdkSessionNotification).
++                  await this.client.sessionUpdate({
++                    sessionId: params.sessionId,
++                    update: {
++                      sessionUpdate: "state_update",
++                      state: message.state,
++                      ...(message.state === "idle" && session.cancelled
++                        ? { stopReason: "cancelled" }
++                        : {}),
++                    },
++                  } as unknown as SessionNotification);
++                }
+                 sessionIndex.noteSessionState(session, previousState, message.state);
+                 if (message.state === "running") this.sessionIndex.onTurnStarted(params.sessionId);
+                 this.sessionIndex.onOwnSessionChanged(params.sessionId);
+diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
+index 85ba9b4..ae3f2ea 100644
+--- a/src/tests/acp-agent.test.ts
++++ b/src/tests/acp-agent.test.ts
+@@ -19665,6 +19665,116 @@ describe("turn steering (_session/steering)", () => {
+     expect(captured[0].priority).toBe("next");
+   });
+ 
++  it("steers into work Claude Code started on its own, and leaves an idle session's message to the host", async () => {
++    const timeline: string[] = [];
++    const agent = new ClaudeAcpAgent(timelineClient(timeline), { log: () => {}, error: () => {} });
++    const captured: any[] = [];
++    let notify!: () => void;
++    const notified = new Promise<void>((resolve) => (notify = resolve));
++    let selfStarted = false;
++    injectGeneratorSession(agent, (input) => {
++      async function* messageGenerator() {
++        const iter = input[Symbol.asyncIterator]();
++        const u1 = await iter.next();
++        yield { type: "system", subtype: "session_state_changed", state: "running" };
++        yield userEcho(u1.value);
++        yield { ...createResultMessage(), origin: { kind: "human" } };
++        yield idleMessage();
++        // A background task finishes: Claude Code works on it with no prompt
++        // from the host (as read on CLI 2.1.296).
++        await notified;
++        yield { type: "system", subtype: "session_state_changed", state: "running" };
++        selfStarted = true;
++        const steered = await iter.next();
++        captured.push(steered.value);
++        yield userEcho(steered.value);
++        yield createAssistantText("finished steered");
++        yield {
++          ...createResultMessage(),
++          origin: { kind: "task-notification" },
++          user_message_uuids: [steered.value.uuid],
++        };
++        yield idleMessage();
++        await iter.next(); // the session stays open
++      }
++      return messageGenerator();
++    });
++
++    await expect(
++      agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "start" }] }),
++    ).resolves.toEqual(expect.objectContaining({ stopReason: "end_turn" }));
++    notify();
++    await waitFor(() => selfStarted);
++
++    const steer = (text: string) =>
++      agent.steer({
++        sessionId: "test-session",
++        prompt: [{ type: "text", text }],
++        _meta: { steering: { idleBehavior: "promptRequired", delivery: "next" } },
++      });
++    await expect(steer("also say steered")).resolves.toEqual({ outcome: "injected" });
++    expect(agent.sessions["test-session"].turnQueue).toHaveLength(0);
++    await waitFor(() => timeline.includes("finished steered"));
++    expect(captured).toHaveLength(1);
++    expect(captured[0].priority).toBe("next");
++
++    await waitFor(() => agent.sessions["test-session"].lastSessionState === "idle");
++    await expect(steer("too late")).resolves.toEqual({
++      outcome: "promptRequired",
++      reason: "noRunningTurn",
++    });
++    expect(captured).toHaveLength(1);
++  });
++
++  it.each([
++    {
++      declared: true,
++      expected: ["running", "idle", "running", "requires_action", "running", "idle"],
++    },
++    { declared: false, expected: [] },
++  ])(
++    "reports Claude Code's state changes as state_update (client declares it: $declared)",
++    async ({ declared, expected }) => {
++      const states: string[] = [];
++      const client = {
++        sessionUpdate: async (notification: any) => {
++          if (notification.update?.sessionUpdate === "state_update") {
++            expect(notification.sessionId).toBe("test-session");
++            states.push(notification.update.state);
++          }
++        },
++      } as unknown as AcpClient;
++      const agent = new ClaudeAcpAgent(client, { log: () => {}, error: () => {} });
++      (agent as any).clientCapabilities = declared ? { _meta: { "session-state": true } } : {};
++      const state = (s: string) => ({ type: "system", subtype: "session_state_changed", state: s });
++      injectGeneratorSession(agent, (input) => {
++        async function* messageGenerator() {
++          const iter = input[Symbol.asyncIterator]();
++          const u1 = await iter.next();
++          yield state("running");
++          yield state("running"); // a repeat is not a change
++          yield userEcho(u1.value);
++          yield { ...createResultMessage(), origin: { kind: "human" } };
++          yield state("idle");
++          // work Claude Code starts on its own, waiting on the user once
++          yield state("running");
++          yield state("requires_action");
++          yield state("running");
++          yield { ...createResultMessage(), origin: { kind: "task-notification" } };
++          yield state("idle");
++          await iter.next();
++        }
++        return messageGenerator();
++      });
++
++      await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "start" }] });
++      if (declared) await waitFor(() => states.length === expected.length);
++      else await waitFor(() => agent.sessions["test-session"].lastSessionState === "idle");
++      await new Promise((r) => setTimeout(r, 10));
++      expect(states).toEqual(expected);
++    },
++  );
++
+   it.each([
+     {
+       name: "a permission request",

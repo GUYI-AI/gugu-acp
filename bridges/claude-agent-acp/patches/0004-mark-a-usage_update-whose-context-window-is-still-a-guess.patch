@@ -28,10 +28,10 @@ Drop when: upstream reports on usage_update whether `size` is confirmed.
  2 files changed, 97 insertions(+), 4 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index f10c8b5..2d4c005 100644
+index 023c812..df43692 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -3770,7 +3770,10 @@ export class ClaudeAcpAgent {
+@@ -4219,7 +4219,10 @@ export class ClaudeAcpAgent {
      };
  
      // ACP's usage_update has no model field, so the model the usage belongs
@@ -43,7 +43,7 @@ index f10c8b5..2d4c005 100644
      const attachUsageModel = <
        T extends {
          sessionUpdate: "usage_update";
-@@ -3781,12 +3784,14 @@ export class ClaudeAcpAgent {
+@@ -4230,12 +4233,14 @@ export class ClaudeAcpAgent {
      >(
        update: T,
      ): T => {
@@ -61,10 +61,10 @@ index f10c8b5..2d4c005 100644
        };
      };
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index e237076..20bd39c 100644
+index 51e0a61..85ba9b4 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -10535,6 +10535,89 @@ describe("usage_update computation", () => {
+@@ -11497,6 +11497,89 @@ describe("usage_update computation", () => {
      expect(usageUpdates[1].update.cost).toBeDefined();
    });
  
@@ -154,7 +154,7 @@ index e237076..20bd39c 100644
    it("includes the effective model id on usage_update notifications", async () => {
      const { agent, updates } = createMockAgentWithCapture();
      injectSession(agent, [
-@@ -13981,9 +14064,11 @@ describe("result origin handling", () => {
+@@ -14943,9 +15026,11 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();
@@ -166,7 +166,7 @@ index e237076..20bd39c 100644
      });
    });
  
-@@ -13999,7 +14084,10 @@ describe("result origin handling", () => {
+@@ -14961,7 +15046,10 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();

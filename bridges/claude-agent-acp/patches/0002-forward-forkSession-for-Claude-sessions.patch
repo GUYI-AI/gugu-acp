@@ -31,10 +31,10 @@ rebased on.
  3 files changed, 55 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index c75b994..04ddc8b 100644
+index 6cef0f9..faf8ae5 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -2557,9 +2557,10 @@ export class ClaudeAcpAgent {
+@@ -2821,9 +2821,10 @@ export class ClaudeAcpAgent {
  
    async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
      if (this.providerUpdate) await this.providerUpdate;
@@ -45,13 +45,13 @@ index c75b994..04ddc8b 100644
 +      resume: options?.resume,
 +      forkSession: options?.forkSession,
      });
-     // Needs to happen after we return the session
-     setTimeout(() => {
+     this.afterSetupResponse(response.sessionId, params.mcpServers);
+     return response;
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 164ce22..e237076 100644
+index 1307164..51e0a61 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -349,6 +349,42 @@ describe("task plan lifecycle", () => {
+@@ -351,6 +351,42 @@ describe("task plan lifecycle", () => {
    });
  });
  
@@ -95,10 +95,10 @@ index 164ce22..e237076 100644
    let child: ReturnType<typeof spawn>;
  
 diff --git a/src/tests/create-session-options.test.ts b/src/tests/create-session-options.test.ts
-index c51620c..abd9243 100644
+index 435d5b6..fbfb1e6 100644
 --- a/src/tests/create-session-options.test.ts
 +++ b/src/tests/create-session-options.test.ts
-@@ -99,6 +99,22 @@ describe("createSession options merging", () => {
+@@ -120,6 +120,22 @@ describe("createSession options merging", () => {
      agent = new ClaudeAcpAgent(createMockClient());
    });
  
