@@ -54,6 +54,23 @@
               "how": "abc (CI, upstream v0.84.0)"
             }
           ]
+        },
+        {
+          "version": "1.3.0",
+          "upstreamTag": "v0.89.0",
+          "cliFrom": "2.1.293",
+          "verified": [
+            {
+              "cli": "2.1.293",
+              "at": "2026-10-10",
+              "how": "abc + state probe (state_update sequence, steer into work Claude Code started itself), ThinkPad, build = patches on v0.89.0, model through the CLI's own login"
+            },
+            {
+              "cli": "2.1.296",
+              "at": "2026-10-10",
+              "how": "abc + state probe (state_update sequence, steer into work Claude Code started itself), ThinkPad, build = patches on v0.89.0, model through the CLI's own login"
+            }
+          ]
         }
       ]
     }

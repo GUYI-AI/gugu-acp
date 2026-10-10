@@ -19,10 +19,10 @@ semantics.
  2 files changed, 56 insertions(+), 4 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index fdc4bfe..c75b994 100644
+index 4714df2..6cef0f9 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -518,10 +518,13 @@ function parseAsyncTaskStopRequest(value: unknown): AsyncTaskStopRequest {
+@@ -586,10 +586,13 @@ function parseAsyncTaskStopRequest(value: unknown): AsyncTaskStopRequest {
  
  /** How urgently the SDK delivers a steered message relative to the running
   *  turn — an internal Claude implementation detail, not part of the wire
@@ -39,7 +39,7 @@ index fdc4bfe..c75b994 100644
  const STEER_PRIORITY_LATER = "later" as const;
  
  /** Request-level steering options. `promptRequired` is opt-in so existing Hosts
-@@ -530,6 +533,9 @@ type SteerMeta = {
+@@ -598,6 +601,9 @@ type SteerMeta = {
    [key: string]: unknown;
    steering?: {
      idleBehavior?: "promptRequired";
@@ -49,7 +49,7 @@ index fdc4bfe..c75b994 100644
    };
  };
  
-@@ -574,6 +580,13 @@ function parseSteerRequest(params: unknown): SteerRequest {
+@@ -642,6 +648,13 @@ function parseSteerRequest(params: unknown): SteerRequest {
    if (idleBehavior !== undefined && idleBehavior !== "promptRequired") {
      throw RequestError.invalidParams(undefined, "unsupported steering idleBehavior");
    }
@@ -63,7 +63,7 @@ index fdc4bfe..c75b994 100644
    return {
      sessionId,
      prompt: prompt as PromptRequest["prompt"],
-@@ -3442,7 +3455,11 @@ export class ClaudeAcpAgent {
+@@ -3869,7 +3882,11 @@ export class ClaudeAcpAgent {
      // Deliver into the running turn rather than queuing behind it as a fresh
      // prompt would.
      userMessage.priority =
@@ -77,12 +77,12 @@ index fdc4bfe..c75b994 100644
      // check: the interrupt can have the CLI finalizing the aborted cycle by the
      // time the consumer next runs, and an unmarked result would settle the turn
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index d8dab49..164ce22 100644
+index ccf9de0..1307164 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -18238,6 +18238,41 @@ describe("turn steering (_session/steering)", () => {
-     expect(JSON.stringify(injected.message.content)).toContain("also handle X");
-   });
+@@ -19506,6 +19506,41 @@ describe("turn steering (_session/steering)", () => {
+     ]);
+   }
  
 +  it("delivers at the next tool boundary (priority 'next') when the Host opts in via _meta.steering.delivery", async () => {
 +    const agent = createMockAgent();

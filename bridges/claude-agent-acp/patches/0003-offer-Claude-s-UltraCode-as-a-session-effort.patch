@@ -12,33 +12,40 @@ row of the effort picker on models that support `xhigh`: picking it applies
 `xhigh` clears it. Sessions that never touch UltraCode keep the plain
 `effortLevel` update, so other clients see no change.
 
+
+Rebased onto v0.89.0, which brought its own `effortFlagSettings(value,
+settings)`: since CLI 2.1.284 an `effortLevel` change sent without an
+`ultracode` key turns ultracode off, so upstream carries a settings-requested
+ultracode along. The two are merged into `effortFlagSettings(value, previous,
+settings)`: picking the UltraCode row turns it on, leaving the row turns it off
+with the new effort, and otherwise a settings-requested ultracode is carried.
+
 Upstream: agentclientprotocol/claude-agent-acp#1176.
 
 Drop when: upstream exposes UltraCode through configOptions (or an
 extension point Gugu can use without patching).
 ---
- src/acp-agent.ts                         | 34 +++++-----
- src/session-effort.ts                    | 41 +++++++++++-
+ src/acp-agent.ts                         | 24 ++++---
+ src/session-effort.ts                    | 44 ++++++++++--
+ src/tests/model-resolution.test.ts       | 10 +--
  src/tests/session-config-options.test.ts | 14 ++++
- src/tests/ultracode-effort.test.ts       | 83 ++++++++++++++++++++++++
- 4 files changed, 155 insertions(+), 17 deletions(-)
+ src/tests/ultracode-effort.test.ts       | 90 ++++++++++++++++++++++++
+ 5 files changed, 163 insertions(+), 19 deletions(-)
  create mode 100644 src/tests/ultracode-effort.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 04ddc8b..f10c8b5 100644
+index faf8ae5..023c812 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -273,7 +273,8 @@ import {
-   EFFORT_CONFIG_ID,
+@@ -311,6 +311,7 @@ import {
+   effortFlagSettings,
    mergeEffortSettings,
    settingsEffortForModel,
--  toSdkEffortLevel,
-+  effortFlagSettings,
 +  modelSupportsEffort,
  } from "./session-effort.js";
  
  export { EFFORT_CONFIG_ID, settingsEffortForModel } from "./session-effort.js";
-@@ -8114,9 +8115,7 @@ export class ClaudeAcpAgent {
+@@ -9047,9 +9048,7 @@ export class ClaudeAcpAgent {
            ? currentEffort
            : pinnedEffort);
        const effortPinnedForNewModel =
@@ -49,80 +56,88 @@ index 04ddc8b..f10c8b5 100644
        const seedEffort = effortPinnedForNewModel
          ? pinnedEffort
          : settingsEffortForModel(
-@@ -8162,14 +8161,14 @@ export class ClaudeAcpAgent {
+@@ -9097,14 +9096,15 @@ export class ClaudeAcpAgent {
          const newEffort =
            typeof newEffortOpt?.currentValue === "string" ? newEffortOpt.currentValue : undefined;
          try {
--          await session.query.applyFlagSettings({
--            // A legacy client's unpinned effort is display-only: the CLI
--            // resolves the persisted value for the new model. When an old
--            // user pin is no longer supported, clear the flag layer instead
--            // of replacing it with that displayed value. Opted-in clients
--            // deliberately apply their concrete displayed effort.
--            effortLevel: useRecommendedValue ? toSdkEffortLevel(newEffort) : null,
--          });
 +          // A legacy client's unpinned effort is display-only: the CLI
 +          // resolves the persisted value for the new model. When an old
 +          // user pin is no longer supported, clear the flag layer instead
 +          // of replacing it with that displayed value (UltraCode included).
 +          // Opted-in clients deliberately apply their concrete displayed effort.
-+          await session.query.applyFlagSettings(
-+            effortFlagSettings(useRecommendedValue ? newEffort : undefined, currentEffort),
-+          );
-           session.effortPinnedLevel = effortPinnedForNewModel ? pinnedEffort : undefined;
-           session.appliedEffortLevel =
-             useRecommendedValue && newEffort !== "default" ? newEffort : undefined;
-@@ -8223,9 +8222,12 @@ export class ClaudeAcpAgent {
+           await session.query.applyFlagSettings(
+-            // A legacy client's unpinned effort is display-only: the CLI
+-            // resolves the persisted value for the new model. When an old
+-            // user pin is no longer supported, clear the flag layer instead
+-            // of replacing it with that displayed value. Opted-in clients
+-            // deliberately apply their concrete displayed effort.
+             effortFlagSettings(
+               useRecommendedValue ? newEffort : undefined,
++              currentEffort,
+               mergeEffortSettings(
+                 session.settingsManager.getSettings(),
+                 session.effortSettingsOverride,
+@@ -9177,9 +9177,13 @@ export class ClaudeAcpAgent {
      } else if (configId === EFFORT_CONFIG_ID) {
        // Apply first so a rejected control request cannot leave the displayed
        // value ahead of the SDK flag layer.
--      await session.query.applyFlagSettings({
--        effortLevel: toSdkEffortLevel(value),
--      });
 +      const previousEffort = session.configOptions.find(
 +        (o) => o.id === EFFORT_CONFIG_ID,
 +      )?.currentValue;
-+      await session.query.applyFlagSettings(
-+        effortFlagSettings(value, typeof previousEffort === "string" ? previousEffort : undefined),
-+      );
-       session.configOptions = session.configOptions.map((o) =>
-         o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
-       );
-@@ -9057,7 +9059,7 @@ export class ClaudeAcpAgent {
+       await session.query.applyFlagSettings(
+         effortFlagSettings(
+           value,
++          typeof previousEffort === "string" ? previousEffort : undefined,
+           mergeEffortSettings(
+             session.settingsManager.getSettings(),
+             session.effortSettingsOverride,
+@@ -10043,7 +10047,9 @@ export class ClaudeAcpAgent {
        );
        const initialEffort = configOptions.find((option) => option.id === EFFORT_CONFIG_ID);
        if (useRecommendedValue && typeof initialEffort?.currentValue === "string") {
--        await q.applyFlagSettings({ effortLevel: toSdkEffortLevel(initialEffort.currentValue) });
-+        await q.applyFlagSettings(effortFlagSettings(initialEffort.currentValue, undefined));
+-        await q.applyFlagSettings(effortFlagSettings(initialEffort.currentValue, effortSettings));
++        await q.applyFlagSettings(
++          effortFlagSettings(initialEffort.currentValue, undefined, effortSettings),
++        );
        }
        // Seed the context window without awaited IPC. The cached authoritative
        // window from a prior turn wins (`result.modelUsage`, cross-session),
 diff --git a/src/session-effort.ts b/src/session-effort.ts
-index 926168e..eaa43df 100644
+index 122f104..3a53d1a 100644
 --- a/src/session-effort.ts
 +++ b/src/session-effort.ts
-@@ -12,6 +12,32 @@ export function toSdkEffortLevel(value: string | undefined): EffortLevel | null
+@@ -12,18 +12,37 @@ export function toSdkEffortLevel(value: string | undefined): EffortLevel | null
    return value === undefined || value === "default" ? null : (value as EffortLevel);
  }
  
+-// Since CLI 2.1.284 an `effortLevel` that changes the level, sent without an
+-// `ultracode` key, turns ultracode off. The CLI's own effort control keeps
+-// ultracode on at any level, so carry a settings-requested ultracode along
+-// with every effort apply.
 +/** UltraCode is a session flag (xhigh effort plus standing dynamic-workflow
 + *  orchestration), not an EffortLevel. It is offered as one more row of the
 + *  effort picker on models that support `xhigh`. */
 +export const ULTRACODE_EFFORT_ID = "ultracode";
 +
-+/** Flag-layer settings for an effort picker value. Enabling UltraCode clears a
++/** Flag-layer settings for an effort picker value. Picking UltraCode clears a
 + *  stale ordinary effort pin; leaving it (`previous` was UltraCode) turns it
 + *  off in the same update as the new effort, so the two never run together.
-+ *  Sessions that never touched UltraCode get the plain `effortLevel` update. */
-+export function effortFlagSettings(
-+  value: string | undefined,
++ *  Otherwise a settings-requested ultracode is carried along: since CLI
++ *  2.1.284 an `effortLevel` that changes the level, sent without an
++ *  `ultracode` key, turns ultracode off, while the CLI's own effort control
++ *  keeps it on at any level. */
+ export function effortFlagSettings(
+   value: string | undefined,
 +  previous: string | undefined,
+   settings: Settings,
+-): { effortLevel: EffortLevel | null; ultracode?: true } {
 +): { effortLevel: EffortLevel | null; ultracode?: boolean } {
 +  if (value === ULTRACODE_EFFORT_ID) return { ultracode: true, effortLevel: null };
-+  const effortLevel = toSdkEffortLevel(value);
-+  return previous === ULTRACODE_EFFORT_ID ? { ultracode: false, effortLevel } : { effortLevel };
-+}
-+
+   const effortLevel = toSdkEffortLevel(value);
++  if (previous === ULTRACODE_EFFORT_ID) return { ultracode: false, effortLevel };
+   return settings.ultracode === true ? { effortLevel, ultracode: true } : { effortLevel };
+ }
+ 
 +/** Whether a model can run a picker value: its own effort levels, plus
 + *  UltraCode wherever `xhigh` is supported. */
 +export function modelSupportsEffort(modelInfo: ModelInfo | undefined, value: string): boolean {
@@ -134,7 +149,7 @@ index 926168e..eaa43df 100644
  function canonicalizeModelSettingsKey(value: string): string {
    return value
      .trim()
-@@ -27,6 +53,7 @@ export function settingsEffortForModel(
+@@ -39,6 +58,7 @@ export function settingsEffortForModel(
    modelInfo: ModelInfo | undefined,
    modelId?: string,
  ): string | undefined {
@@ -142,7 +157,7 @@ index 926168e..eaa43df 100644
    const modelSettings = settings.modelSettings;
    if (modelSettings) {
      for (const key of [modelInfo?.resolvedModel, modelInfo?.value, modelId]) {
-@@ -78,6 +105,7 @@ export function buildEffortConfigOption(
+@@ -90,6 +110,7 @@ export function buildEffortConfigOption(
      ? (currentModelInfo.supportedEffortLevels ?? [])
      : [];
    if (supportedLevels.length === 0) return undefined;
@@ -150,7 +165,7 @@ index 926168e..eaa43df 100644
  
    const recommendedEffort = (supportedLevels as string[]).includes("medium")
      ? "medium"
-@@ -91,9 +119,20 @@ export function buildEffortConfigOption(
+@@ -103,9 +124,20 @@ export function buildEffortConfigOption(
          .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
          .join(" "),
      })),
@@ -172,8 +187,34 @@ index 926168e..eaa43df 100644
    const currentValue =
      currentEffortLevel && includes(currentEffortLevel)
        ? currentEffortLevel
+diff --git a/src/tests/model-resolution.test.ts b/src/tests/model-resolution.test.ts
+index f908960..9f32ced 100644
+--- a/src/tests/model-resolution.test.ts
++++ b/src/tests/model-resolution.test.ts
+@@ -372,15 +372,17 @@ describe("settingsEffortForModel", () => {
+ 
+ describe("effortFlagSettings", () => {
+   it("carries ultracode only when settings request it", () => {
+-    expect(effortFlagSettings("high", { ultracode: true })).toEqual({
++    expect(effortFlagSettings("high", undefined, { ultracode: true })).toEqual({
+       effortLevel: "high",
+       ultracode: true,
+     });
+-    expect(effortFlagSettings("default", { ultracode: true })).toEqual({
++    expect(effortFlagSettings("default", undefined, { ultracode: true })).toEqual({
+       effortLevel: null,
+       ultracode: true,
+     });
+-    expect(effortFlagSettings("high", { ultracode: false })).toEqual({ effortLevel: "high" });
+-    expect(effortFlagSettings(undefined, {})).toEqual({ effortLevel: null });
++    expect(effortFlagSettings("high", undefined, { ultracode: false })).toEqual({
++      effortLevel: "high",
++    });
++    expect(effortFlagSettings(undefined, undefined, {})).toEqual({ effortLevel: null });
+   });
+ });
 diff --git a/src/tests/session-config-options.test.ts b/src/tests/session-config-options.test.ts
-index d6fa510..9cf88c9 100644
+index 07a29c3..d969288 100644
 --- a/src/tests/session-config-options.test.ts
 +++ b/src/tests/session-config-options.test.ts
 @@ -554,6 +554,20 @@ describe("session config options", () => {
@@ -199,10 +240,10 @@ index d6fa510..9cf88c9 100644
          sessionId: SESSION_ID,
 diff --git a/src/tests/ultracode-effort.test.ts b/src/tests/ultracode-effort.test.ts
 new file mode 100644
-index 0000000..91d2bf4
+index 0000000..ab47ade
 --- /dev/null
 +++ b/src/tests/ultracode-effort.test.ts
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,90 @@
 +import { describe, it, expect } from "vitest";
 +import type { ModelInfo } from "@anthropic-ai/claude-agent-sdk";
 +import {
@@ -253,25 +294,32 @@ index 0000000..91d2bf4
 +  });
 +
 +  it("enables the session flag and clears an ordinary effort pin", () => {
-+    expect(effortFlagSettings(ULTRACODE_EFFORT_ID, "high")).toEqual({
++    expect(effortFlagSettings(ULTRACODE_EFFORT_ID, "high", {})).toEqual({
 +      ultracode: true,
 +      effortLevel: null,
 +    });
 +  });
 +
-+  it("turns UltraCode off in the same update when leaving it", () => {
-+    expect(effortFlagSettings("high", ULTRACODE_EFFORT_ID)).toEqual({
++  it("leaving UltraCode turns it off even when settings still request it", () => {
++    expect(effortFlagSettings("high", ULTRACODE_EFFORT_ID, { ultracode: true })).toEqual({
 +      ultracode: false,
 +      effortLevel: "high",
 +    });
-+    expect(effortFlagSettings("default", ULTRACODE_EFFORT_ID)).toEqual({
++  });
++
++  it("turns UltraCode off in the same update when leaving it", () => {
++    expect(effortFlagSettings("high", ULTRACODE_EFFORT_ID, {})).toEqual({
++      ultracode: false,
++      effortLevel: "high",
++    });
++    expect(effortFlagSettings("default", ULTRACODE_EFFORT_ID, {})).toEqual({
 +      ultracode: false,
 +      effortLevel: null,
 +    });
 +  });
 +
 +  it("leaves sessions that never used UltraCode on the plain effort update", () => {
-+    expect(effortFlagSettings("low", "medium")).toEqual({ effortLevel: "low" });
++    expect(effortFlagSettings("low", "medium", {})).toEqual({ effortLevel: "low" });
 +  });
 +
 +  it("treats UltraCode as supported wherever xhigh is", () => {
