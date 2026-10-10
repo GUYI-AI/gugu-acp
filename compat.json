@@ -71,6 +71,18 @@
               "how": "abc + state probe (state_update sequence, steer into work Claude Code started itself), ThinkPad, build = patches on v0.89.0, model through the CLI's own login"
             }
           ]
+        },
+        {
+          "version": "1.4.0",
+          "upstreamTag": "v0.89.1",
+          "cliFrom": "2.1.296",
+          "verified": [
+            {
+              "cli": "2.1.296",
+              "at": "2026-10-10",
+              "how": "abc (CI, upstream v0.89.1)"
+            }
+          ]
         }
       ]
     }
