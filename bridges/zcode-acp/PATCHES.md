@@ -70,6 +70,15 @@ Measurements behind each patch: gugu-base `notes/2026-10-16-zcode-harness/` (ZCo
 - **Upstream code**: `src/index.ts` `main()` / `runHeadless()`, right after `installCrashGuards()`. New file `src/config/provider-table-content.ts` (+ `tests/provider-table-content.test.ts`).
 - **Check on upgrade**: both entry points still run it before any provider read or backend spawn.
 
+## 0008 `set_config_option(mode)` lands like `session/set_mode`
+
+- **What**: switching mode through `session/set_config_option` (configId `mode`) now does what `session/set_mode` already did after the backend call:
+  - folds the plan flag (`sessionPlanActive`), so the rebuilt options and the `current_mode_update` say `plan`;
+  - records `lastMode` for the turn-completion reconciliation.
+- **Why**: the ZCode runtime keeps `settings.mode` at the underlying mode when plan is set; plan is an execution-state flag. Without the fold, a client that switches to plan through the config option reads back the previous mode and treats its own switch as refused. Gugu does exactly that whenever a bridge advertises a `mode` config option. Measured on mac1 (gugu#7385 A/B): a Gugu session started in Plan failed with "Failed to apply configured permission mode 'plan'". A bare ACP client read `yolo` back after `set_config_option(mode=plan)`, while `build`, `edit` and `yolo` read back as set.
+- **Upstream code**: `src/config/options.ts` `setConfigOption()` (the `mode` branch after the backend `session/setMode`) and `src/handlers/session.ts` `setConfigOptionHandler()`. The reference behaviour is `src/handlers/extensions.ts` `setMode()`. Test: `tests/set-config-option-plan.test.ts`; its fake backend leaves `settings.mode` alone on plan, like the real runtime.
+- **Check on upgrade**: does upstream route `set_config_option(mode)` through `setMode()`, or fold the plan flag there itself? If so, drop the patch.
+
 ## Upgrade checklist
 
 1. `node scripts/build.mjs zcode-acp --tag <new tag>`. A patch that no longer applies stops the build (exit 3).
