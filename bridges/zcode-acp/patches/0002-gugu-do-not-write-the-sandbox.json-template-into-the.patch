@@ -15,9 +15,8 @@ Why: a client launching the bridge (Gugu) must not leave files in the
 user's repository; measured: a fresh workspace got `.zcode/acp/` after one
 session/new + prompt.
 
-Upstream: matches william0wang/zcode-acp#332 ("Option to not write the
-.zcode/acp/sandbox.json discovery template"); PR draft prepared, filing
-needs the owner's go-ahead.
+Upstream: not filed - owner 10-17: kept and maintained here only. Upstream
+issue william0wang/zcode-acp#332 asks for the same; see PATCHES.md.
 
 Drop when: upstream stops auto-creating the template (or adds an opt-out we
 set) in the tag this is built on.

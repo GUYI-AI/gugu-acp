@@ -21,7 +21,8 @@ stopReason=cancelled at +8 s, final reply carried both instructions).
 With the patch: first prompt end_turn, steering answered injected at +8 s,
 reply "A-DONE BANANA" (ZCode 3.15.3, CLI 0.16.9).
 
-Upstream: none yet (draft prepared; filing needs the owner's go-ahead).
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
 
 Drop when: upstream ships `_session/steering` (or an equivalent) in the tag
 this is built on.

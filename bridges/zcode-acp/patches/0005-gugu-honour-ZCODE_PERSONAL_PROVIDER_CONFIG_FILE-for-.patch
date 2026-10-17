@@ -16,7 +16,8 @@ passes it on unchanged; unset, nothing changes.
 Why: Gugu hands a platform session its own provider table (the Gugu model
 gateway) in a file it owns, leaving the user's ZCode configuration alone.
 
-Upstream: none yet (draft prepared; filing needs the owner's go-ahead).
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
 
 Drop when: upstream honours the variable in the tag this is built on.
 ---

@@ -13,8 +13,8 @@ affected - this makes the rule explicit rather than incidental.
 Why: what gets installed on the machine is decided by whoever packages and
 pins this bridge (Gugu), never by a settings call through it.
 
-Upstream: none (an opt-out switch would be the upstream shape; draft
-prepared, filing needs the owner's go-ahead).
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
 
 Drop when: upstream offers an opt-out we can set, or the remote settings
 API is gone from the tag this is built on.

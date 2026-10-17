@@ -19,8 +19,8 @@ Why: Gugu drives the agent only; the user's ZCode desktop list is not its to
 edit. Product-visible: sessions started from Gugu no longer appear in the
 user's ZCode desktop task list.
 
-Upstream: none yet (an opt-out switch would be the upstream shape; draft
-prepared, filing needs the owner's go-ahead).
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
 
 Drop when: upstream offers an opt-out we can set from the client.
 ---
