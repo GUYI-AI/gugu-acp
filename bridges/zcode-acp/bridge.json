@@ -1,6 +1,6 @@
 {
   "package": "@gugu-acp/zcode-acp",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "upstream": {
     "repo": "https://github.com/william0wang/zcode-acp",
     "package": "zcode-acp-server",

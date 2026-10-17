@@ -1,0 +1,223 @@
+From 11483f309e50c2d93066ae2e619a27d6e93ff1bb Mon Sep 17 00:00:00 2001
+From: F2J <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 06:47:36 +0800
+Subject: [PATCH] gugu: a session that starts in plan leaves plan into build,
+ not yolo
+
+Approving a plan (ExitPlanMode) returns the session to the mode underneath
+plan. A session whose first mode is plan never chose one, so it left plan
+into the bridge default (yolo) and ran edits and commands unasked. Plan set
+before the session's first prompt now puts build underneath; a switch to
+plan mid-session keeps the mode the user was in. One helper, backendSetMode,
+serves session/set_mode and set_config_option(mode).
+---
+ src/config/options.ts                | 40 +++++++++++++++++++++++-----
+ src/handlers/extensions.ts           |  6 ++---
+ src/handlers/session.ts              |  1 +
+ src/server.ts                        |  6 +++++
+ tests/set-config-option-plan.test.ts | 37 +++++++++++++++++++++++--
+ tests/set-mode-alias.test.ts         |  3 ++-
+ 6 files changed, 79 insertions(+), 14 deletions(-)
+
+diff --git a/src/config/options.ts b/src/config/options.ts
+index 9aba0d7..4d70ccb 100644
+--- a/src/config/options.ts
++++ b/src/config/options.ts
+@@ -680,6 +680,31 @@ export async function buildConfigOptions(
+  * Returns `{ kind, currentValue, options }` so the caller can emit the update
+  * notifications, or null when the configId is unknown / model switch fails.
+  */
++/**
++ * Switch the backend's mode, the one path for session/set_mode and
++ * set_config_option(mode).
++ *
++ * Plan is an execution-state flag over an underlying mode, and approving the
++ * plan (ExitPlanMode) returns the session to that underlying mode. A session
++ * that STARTS in plan has never chosen one, so it would leave plan into the
++ * bridge's default, yolo: everything runs unasked right after "approve". Such
++ * a session gets build (ask before edits and commands) underneath. A switch to
++ * plan mid-session (after a prompt) keeps the mode the user was in.
++ */
++export async function backendSetMode(
++  server: ZcodeAcpServer,
++  zcodeSid: string,
++  acpSid: string | undefined,
++  mode: string,
++): Promise<{ result?: unknown; error?: { message?: string } }> {
++  const backend = await server.ensureBackend();
++  if (mode === "plan" && acpSid !== undefined && !server.promptedSessions.has(acpSid)) {
++    const under = await backend.request(server.nextId(), "session/setMode", { sessionId: zcodeSid, mode: "build" }, 15000);
++    if (under.error) return under;
++  }
++  return backend.request(server.nextId(), "session/setMode", { sessionId: zcodeSid, mode }, 15000);
++}
++
+ export async function setConfigOption(
+   server: ZcodeAcpServer,
+   zcodeSid: string,
+@@ -696,13 +721,14 @@ export async function setConfigOption(
+   }
+   const dispatch = CONFIG_DISPATCH[configId];
+   if (!dispatch) return null;
+-  const backend = await server.ensureBackend();
+-  const resp = await backend.request(
+-    server.nextId(),
+-    dispatch.method,
+-    { sessionId: zcodeSid, [dispatch.paramKey]: value },
+-    15000,
+-  );
++  const resp = configId === "mode"
++    ? await backendSetMode(server, zcodeSid, acpSid, value)
++    : await (await server.ensureBackend()).request(
++        server.nextId(),
++        dispatch.method,
++        { sessionId: zcodeSid, [dispatch.paramKey]: value },
++        15000,
++      );
+   if (resp.error) return null;
+   if (configId === "mode") {
+     // Same execution-state fold as session/set_mode (handlers/extensions.ts
+diff --git a/src/handlers/extensions.ts b/src/handlers/extensions.ts
+index 7364ae8..57fe006 100644
+--- a/src/handlers/extensions.ts
++++ b/src/handlers/extensions.ts
+@@ -26,7 +26,7 @@ import type * as acp from "@agentclientprotocol/sdk";
+ 
+ import { emitInitialUsage } from "../config/model-cache.js";
+ import { applyModelSwitch } from "../config/runtime-model.js";
+-import { emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
++import { backendSetMode, emitConfigOptionUpdate, rememberModelChoice } from "../config/options.js";
+ import { ProjectionDiffer } from "../translators/projection-differ.js";
+ import { log, warn } from "../utils.js";
+ import type { ZcodeAcpServer } from "../server.js";
+@@ -323,9 +323,7 @@ export async function setMode(
+   // -32601 when it wasn't routed, so both normalize here.
+   const mode = params.mode ?? params.modeId;
+   if (!mode) throw new Error("setMode requires mode");
+-  const resp = await (
+-    await server.ensureBackend()
+-  ).request(server.nextId(), "session/setMode", { sessionId: zcodeSid, mode }, 15000);
++  const resp = await backendSetMode(server, zcodeSid, acpSid, String(mode));
+   if (resp.error) throw new Error(`setMode failed: ${resp.error.message}`);
+   log(`session/setMode → ${mode}`);
+   // Mirror the runtime's own execution-state fold NOW (mode "plan" enables
+diff --git a/src/handlers/session.ts b/src/handlers/session.ts
+index 0d9f28e..d5d40a1 100644
+--- a/src/handlers/session.ts
++++ b/src/handlers/session.ts
+@@ -2180,6 +2180,7 @@ async function runPrompt(
+   // respawns under the profile and the subscribe-recovery path reloads the
+   // session. No-op unless the config appeared mid-run.
+   await server.applySandboxFlip();
++  server.promptedSessions.add(params.sessionId);
+   const backend = await server.ensureBackend();
+ 
+   const { text, attachments } = await convertPromptContent(
+diff --git a/src/server.ts b/src/server.ts
+index 271d4b9..b7f37a0 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -498,6 +498,12 @@ export class ZcodeAcpServer {
+    * displays or advertises.
+    */
+   readonly sessionPlanActive = new Set<string>();
++  /**
++   * ACP sessions this bridge has run a prompt for. A switch to plan BEFORE
++   * the first prompt means the session starts in plan; see backendSetMode
++   * (config/options.ts) for why that matters.
++   */
++  readonly promptedSessions = new Set<string>();
+   /**
+    * Timestamp of the last cancel (user stop or preempt), keyed by zcodeSid.
+    * Set in cancel() and preemptInFlightTurn(); read in runEventTurn's stall
+diff --git a/tests/set-config-option-plan.test.ts b/tests/set-config-option-plan.test.ts
+index 9898ee5..04221df 100644
+--- a/tests/set-config-option-plan.test.ts
++++ b/tests/set-config-option-plan.test.ts
+@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from "vitest";
+ 
+ import { ZCODE_CREDS_PATH } from "../src/utils.js";
+ import { setConfigOptionHandler } from "../src/handlers/session.js";
++import { setMode } from "../src/handlers/extensions.js";
+ import { ZcodeAcpServer } from "../src/server.js";
+ 
+ const FAKE_CONFIG = {
+@@ -42,7 +43,9 @@ vi.mock("node:fs", async () => {
+ class FakeBackend {
+   isDead = false;
+   modeNow = "yolo";
++  modeCalls: string[] = [];
+   async request(id: number, method: string, params?: Record<string, unknown>) {
++    if (method === "session/setMode") this.modeCalls.push(String(params?.mode));
+     if (method === "session/read") {
+       return { id, result: { projection: { status: "idle" }, settings: { mode: { current: this.modeNow } } } };
+     }
+@@ -54,7 +57,8 @@ class FakeBackend {
+ function setup() {
+   const server = new ZcodeAcpServer();
+   server.registerSession("sess_acp", "sess_zcode");
+-  server.backend = new FakeBackend() as unknown as ZcodeAcpServer["backend"];
++  const backend = new FakeBackend();
++  server.backend = backend as unknown as ZcodeAcpServer["backend"];
+   const sent: acp.SessionUpdate[] = [];
+   const cx = {
+     notify(_method: string, params: { update: acp.SessionUpdate }) {
+@@ -62,7 +66,7 @@ function setup() {
+       return Promise.resolve();
+     },
+   } as unknown as acp.AgentContext;
+-  return { server, cx, sent };
++  return { server, backend, cx, sent };
+ }
+ 
+ const modeOf = (r: acp.SetSessionConfigOptionResponse) =>
+@@ -85,3 +89,32 @@ describe("set_config_option(mode)", () => {
+     expect(server.sessionPlanActive.has("sess_zcode")).toBe(false);
+   });
+ });
++
++/**
++ * gugu 0009: approving a plan returns the session to the mode underneath plan.
++ * A session that starts in plan never chose one; it must not leave plan into
++ * the bridge default (yolo), but into build (ask before edits and commands).
++ */
++describe("a session that starts in plan leaves plan into build", () => {
++  it("set_config_option(plan) before the first prompt puts build underneath", async () => {
++    const { server, backend, cx } = setup();
++    await setConfigOptionHandler(server, { sessionId: "sess_acp", configId: "mode", value: "plan" }, cx);
++    expect(backend.modeCalls).toEqual(["build", "plan"]);
++    expect(backend.modeNow).toBe("build");
++  });
++
++  it("session/set_mode(plan) before the first prompt does the same", async () => {
++    const { server, backend, cx } = setup();
++    await setMode(server, { sessionId: "sess_acp", modeId: "plan" }, cx);
++    expect(backend.modeCalls).toEqual(["build", "plan"]);
++    expect(backend.modeNow).toBe("build");
++  });
++
++  it("a switch to plan mid-session keeps the mode the user was in", async () => {
++    const { server, backend, cx } = setup();
++    server.promptedSessions.add("sess_acp");
++    await setConfigOptionHandler(server, { sessionId: "sess_acp", configId: "mode", value: "plan" }, cx);
++    expect(backend.modeCalls).toEqual(["plan"]);
++    expect(backend.modeNow).toBe("yolo");
++  });
++});
+diff --git a/tests/set-mode-alias.test.ts b/tests/set-mode-alias.test.ts
+index 69692c9..279f609 100644
+--- a/tests/set-mode-alias.test.ts
++++ b/tests/set-mode-alias.test.ts
+@@ -105,7 +105,8 @@ describe("setMode param normalization", () => {
+     const { server, backend } = makeServer();
+     const { cx } = mockContext();
+     await setMode(server, { sessionId: "sess_acp", mode: "plan" }, cx);
+-    const call = backend.calls.find((c) => c.method === "session/setMode");
++    // gugu 0009: a session that starts in plan gets build underneath first; the plan call is the last one.
++    const call = backend.calls.filter((c) => c.method === "session/setMode").at(-1);
+     expect(call?.params).toEqual({ sessionId: "sess_zcode", mode: "plan" });
+   });
+ 
+-- 
+2.43.0
+
