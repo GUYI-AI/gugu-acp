@@ -1,0 +1,154 @@
+From 484fd036643e927930ad1366a750e2e65a73d587 Mon Sep 17 00:00:00 2001
+From: F2J <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 05:44:36 +0800
+Subject: [PATCH] gugu: set_config_option(mode) lands like session/set_mode
+ (plan reads back as plan)
+
+The runtime keeps settings.mode at the underlying mode when plan is set;
+session/set_mode folds the plan flag in, set_config_option did not, so a
+client switching to plan through the config option read back the previous
+mode. Fold the flag and record lastMode on this path too.
+---
+ src/config/options.ts                |  8 +++
+ src/handlers/session.ts              |  5 +-
+ tests/set-config-option-plan.test.ts | 87 ++++++++++++++++++++++++++++
+ 3 files changed, 99 insertions(+), 1 deletion(-)
+ create mode 100644 tests/set-config-option-plan.test.ts
+
+diff --git a/src/config/options.ts b/src/config/options.ts
+index 619be36..9aba0d7 100644
+--- a/src/config/options.ts
++++ b/src/config/options.ts
+@@ -704,6 +704,14 @@ export async function setConfigOption(
+     15000,
+   );
+   if (resp.error) return null;
++  if (configId === "mode") {
++    // Same execution-state fold as session/set_mode (handlers/extensions.ts
++    // setMode): the runtime keeps settings.mode at the underlying mode when
++    // "plan" is set, so without the flag the options rebuilt below read back
++    // the previous mode and the client sees its switch to plan as refused.
++    if (value === "plan") server.sessionPlanActive.add(zcodeSid);
++    else server.sessionPlanActive.delete(zcodeSid);
++  }
+   if (configId === "thought") {
+     rememberModelChoice(server, acpSid, zcodeSid, { thought: value });
+   }
+diff --git a/src/handlers/session.ts b/src/handlers/session.ts
+index 323eb6e..0d9f28e 100644
+--- a/src/handlers/session.ts
++++ b/src/handlers/session.ts
+@@ -2510,13 +2510,16 @@ export async function setConfigOptionHandler(
+   if (!result) {
+     throw new Error(`unsupported config option or switch failed: ${params.configId}`);
+   }
+-  const { options } = await emitConfigOptionUpdate(
++  const { options, currentModeId } = await emitConfigOptionUpdate(
+     server,
+     cx,
+     params.sessionId,
+     zcodeSid,
+     result.kind,
+   );
++  // As in setMode: the turn-completion reconciliation must know the client
++  // has already been told about this mode.
++  if (currentModeId !== undefined) server.lastMode.set(params.sessionId, currentModeId);
+   return { configOptions: options };
+ }
+ 
+diff --git a/tests/set-config-option-plan.test.ts b/tests/set-config-option-plan.test.ts
+new file mode 100644
+index 0000000..9898ee5
+--- /dev/null
++++ b/tests/set-config-option-plan.test.ts
+@@ -0,0 +1,87 @@
++/**
++ * session/set_config_option(mode) must land exactly like session/set_mode.
++ *
++ * The ZCode runtime keeps settings.mode at the underlying mode when "plan" is
++ * set (plan is an execution-state flag, see buildModes). session/set_mode
++ * folds that flag in; set_config_option did not, so a client switching to plan
++ * through the config option read back the previous mode and treated its own
++ * switch as refused (gugu: "Failed to apply configured permission mode 'plan'").
++ */
++
++import type * as acp from "@agentclientprotocol/sdk";
++import { describe, expect, it, vi } from "vitest";
++
++import { ZCODE_CREDS_PATH } from "../src/utils.js";
++import { setConfigOptionHandler } from "../src/handlers/session.js";
++import { ZcodeAcpServer } from "../src/server.js";
++
++const FAKE_CONFIG = {
++  provider: {
++    "builtin:bigmodel-coding-plan": {
++      name: "GLM Coding Plan",
++      kind: "anthropic",
++      enabled: true,
++      options: { baseURL: "https://example.test/api", apiKey: "plan-token" },
++      models: { "GLM-5.3": { limit: { context: 1000000 }, reasoning: { variants: ["low", "high", "max"] } } },
++    },
++  },
++};
++
++vi.mock("node:fs", async () => {
++  const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
++  return {
++    ...actual,
++    readFileSync: (p: string) => {
++      if (p === ZCODE_CREDS_PATH) return JSON.stringify(FAKE_CONFIG);
++      return actual.readFileSync(p);
++    },
++  };
++});
++
++/** Like the real runtime: "plan" leaves settings.mode at the underlying mode. */
++class FakeBackend {
++  isDead = false;
++  modeNow = "yolo";
++  async request(id: number, method: string, params?: Record<string, unknown>) {
++    if (method === "session/read") {
++      return { id, result: { projection: { status: "idle" }, settings: { mode: { current: this.modeNow } } } };
++    }
++    if (method === "session/setMode" && params?.mode !== "plan") this.modeNow = String(params?.mode);
++    return { id, result: {} };
++  }
++}
++
++function setup() {
++  const server = new ZcodeAcpServer();
++  server.registerSession("sess_acp", "sess_zcode");
++  server.backend = new FakeBackend() as unknown as ZcodeAcpServer["backend"];
++  const sent: acp.SessionUpdate[] = [];
++  const cx = {
++    notify(_method: string, params: { update: acp.SessionUpdate }) {
++      sent.push(params.update);
++      return Promise.resolve();
++    },
++  } as unknown as acp.AgentContext;
++  return { server, cx, sent };
++}
++
++const modeOf = (r: acp.SetSessionConfigOptionResponse) =>
++  r.configOptions.find((o) => o.id === "mode")?.currentValue;
++
++describe("set_config_option(mode)", () => {
++  it("reads back plan after switching to plan", async () => {
++    const { server, cx, sent } = setup();
++    const r = await setConfigOptionHandler(server, { sessionId: "sess_acp", configId: "mode", value: "plan" }, cx);
++    expect(modeOf(r)).toBe("plan");
++    expect(sent.find((u) => u.sessionUpdate === "current_mode_update")).toMatchObject({ currentModeId: "plan" });
++    expect(server.lastMode.get("sess_acp")).toBe("plan");
++  });
++
++  it("leaving plan reads back the new mode", async () => {
++    const { server, cx } = setup();
++    await setConfigOptionHandler(server, { sessionId: "sess_acp", configId: "mode", value: "plan" }, cx);
++    const r = await setConfigOptionHandler(server, { sessionId: "sess_acp", configId: "mode", value: "build" }, cx);
++    expect(modeOf(r)).toBe("build");
++    expect(server.sessionPlanActive.has("sess_zcode")).toBe(false);
++  });
++});
+-- 
+2.43.0
+
