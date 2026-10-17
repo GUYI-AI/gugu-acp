@@ -18,7 +18,7 @@ scripts/          build · abc · publish · upstream · compat · follow
 
 One repo for all bridges, Electron-style: Electron does not fork Chromium, it keeps `patches/` and applies them to a pinned Chromium ([electron/docs/development/patches.md](https://github.com/electron/electron/blob/main/docs/development/patches.md)).
 
-Bridges: `claude-agent-acp` (paired with the user's Claude Code version), `pi-acp` (not paired yet).
+Bridges: `claude-agent-acp` (paired with the user's Claude Code version), `pi-acp` (not paired yet), `zcode-acp` (not paired yet; ZCode's CLI ships inside the ZCode desktop app, not on npm, so `follow`/ABC for it run by hand).
 
 ## Rules for patches
 

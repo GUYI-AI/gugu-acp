@@ -1,0 +1,160 @@
+From ce2101b2582cd57789b0798efe37f60abc7d1f6e Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 14:24:45 +0800
+Subject: [PATCH 3/4] gugu: writes into the ZCode App's tasks-index.sqlite are
+ opt-in
+
+The bridge wrote every ACP session into the ZCode desktop App's own
+`~/.zcode/v2/tasks-index.sqlite` (upsert on session/new, title sync,
+rename, soft delete, workspace delete, tombstone revival), so sessions a
+client like Gugu started showed up - and were renamed / deleted - in the
+user's own ZCode desktop task list. That is a write into another app's
+database outside the ZCode protocol, and breaks silently when the App
+changes its schema. All six writers now run only with
+ZCODE_ACP_TASKS_INDEX_WRITES=1; reads (hidden ids, deleted flags, title
+override, known workspaces) are unchanged. The sessions themselves stay in
+the ZCode CLI's own session store (`zcode --resume <id>` still finds them).
+
+Why: Gugu drives the agent only; the user's ZCode desktop list is not its to
+edit. Product-visible: sessions started from Gugu no longer appear in the
+user's ZCode desktop task list.
+
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
+
+Drop when: upstream offers an opt-out we can set from the client.
+---
+ src/tasks-index.ts                   | 24 ++++++++++++++++++------
+ tests/tasks-index-workspaces.test.ts |  2 ++
+ tests/tasks-index.test.ts            | 18 +++++++++++++++++-
+ 3 files changed, 37 insertions(+), 7 deletions(-)
+
+diff --git a/src/tasks-index.ts b/src/tasks-index.ts
+index 1b1a132..1a69853 100644
+--- a/src/tasks-index.ts
++++ b/src/tasks-index.ts
+@@ -51,6 +51,18 @@ async function loadSqlite(): Promise<DatabaseSyncCtor | null> {
+   return DatabaseSync;
+ }
+ 
++/**
++ * Writes into the ZCode App's own tasks-index.sqlite are opt-in (gugu build):
++ * with them, every ACP session shows up — and is renamed / soft-deleted — in
++ * the user's ZCode desktop task list, by writing another app's database
++ * outside the ZCode protocol. A client that only drives the agent (Gugu) must
++ * leave that list alone, so writes happen only with
++ * ZCODE_ACP_TASKS_INDEX_WRITES=1. Reads (hidden ids, titles, workspaces) stay.
++ */
++export function appIndexWritesEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
++  return env.ZCODE_ACP_TASKS_INDEX_WRITES === "1";
++}
++
+ /** tasks-index.sqlite sits next to config.json under ~/.zcode/v2/. */
+ const TASKS_INDEX_PATH = path.join(path.dirname(ZCODE_CREDS_PATH), "tasks-index.sqlite");
+ 
+@@ -155,7 +167,7 @@ export async function upsertSessionTask(opts: {
+   model?: string;
+   status?: string;
+ }): Promise<boolean> {
+-  if (!existsSync(TASKS_INDEX_PATH)) return false; // App never installed → no index.
++  if (!appIndexWritesEnabled() || !existsSync(TASKS_INDEX_PATH)) return false; // App never installed → no index.
+   const nowMs = Date.now();
+   const { providerId, modelRef } = resolveProviderModel();
+   const model = opts.model ?? modelRef;
+@@ -223,7 +235,7 @@ export async function upsertSessionTask(opts: {
+  * is missing or the index is unavailable.
+  */
+ export async function renameSessionTask(taskId: string, title: string): Promise<boolean> {
+-  if (!existsSync(TASKS_INDEX_PATH)) return false;
++  if (!appIndexWritesEnabled() || !existsSync(TASKS_INDEX_PATH)) return false;
+   const trimmed = title.trim().slice(0, 80);
+   if (!trimmed) return false;
+   try {
+@@ -279,7 +291,7 @@ export async function updateSessionTitle(
+   title: string,
+   searchableText?: string,
+ ): Promise<boolean> {
+-  if (!existsSync(TASKS_INDEX_PATH) || !title) return false;
++  if (!appIndexWritesEnabled() || !existsSync(TASKS_INDEX_PATH) || !title) return false;
+   const trimmed = title.trim().slice(0, 80);
+   if (!trimmed) return false;
+   // Cap searchable_text at the App's limit (aD = 2e5 = 200000 chars).
+@@ -353,7 +365,7 @@ export async function softDeleteTask(opts: {
+   workspacePath: string;
+   title?: string;
+ }): Promise<boolean> {
+-  if (!existsSync(TASKS_INDEX_PATH)) return false;
++  if (!appIndexWritesEnabled() || !existsSync(TASKS_INDEX_PATH)) return false;
+   const nowMs = Date.now();
+   const { providerId, modelRef } = resolveProviderModel();
+   const title = (opts.title ?? "").trim().slice(0, 80) || "deleted session";
+@@ -431,7 +443,7 @@ export async function softDeleteWorkspaceTasks(
+   workspacePath: string,
+   dbPath: string = TASKS_INDEX_PATH,
+ ): Promise<number> {
+-  if (!existsSync(dbPath)) return 0;
++  if (!appIndexWritesEnabled() || !existsSync(dbPath)) return 0;
+   try {
+     const flipped = await withSqliteRetry(
+       (con) =>
+@@ -480,7 +492,7 @@ export async function reviveTombstonesOnActivity(
+   opts: { taskId?: string; workspacePath?: string },
+   dbPath: string = TASKS_INDEX_PATH,
+ ): Promise<number> {
+-  if (!existsSync(dbPath)) return 0;
++  if (!appIndexWritesEnabled() || !existsSync(dbPath)) return 0;
+   try {
+     const revived = await withSqliteRetry((con) => {
+       let flipped = 0;
+diff --git a/tests/tasks-index-workspaces.test.ts b/tests/tasks-index-workspaces.test.ts
+index d7cc820..8769148 100644
+--- a/tests/tasks-index-workspaces.test.ts
++++ b/tests/tasks-index-workspaces.test.ts
+@@ -113,6 +113,8 @@ import {
+ // (not node:os) — pin it to the same fake home the node:os mock reports.
+ beforeEach(() => {
+   vi.stubEnv("HOME", "/fake/home");
++  // softDeleteWorkspaceTasks is a writer; writes are opt-in (gugu).
++  vi.stubEnv("ZCODE_ACP_TASKS_INDEX_WRITES", "1");
+ });
+ 
+ afterEach(() => {
+diff --git a/tests/tasks-index.test.ts b/tests/tasks-index.test.ts
+index ddfffe8..eb4479a 100644
+--- a/tests/tasks-index.test.ts
++++ b/tests/tasks-index.test.ts
+@@ -17,7 +17,7 @@
+  * the quota.test.ts pattern of mocking environment dependencies for CI.
+  */
+ 
+-import { beforeEach, describe, expect, it, vi } from "vitest";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+ 
+ // Row shape stored by the in-memory fake. Mirrors the columns the production
+ // code writes; defaults match the real `tasks` table DDL.
+@@ -407,6 +407,22 @@ describe("tasks-index session sync", () => {
+   beforeEach(() => {
+     rows = new Map();
+     busyTimes = 0;
++    // These cases exercise the writers themselves; writes are opt-in (gugu).
++    vi.stubEnv("ZCODE_ACP_TASKS_INDEX_WRITES", "1");
++  });
++  afterEach(() => {
++    vi.unstubAllEnvs();
++  });
++
++  it("writes nothing into the App's index unless ZCODE_ACP_TASKS_INDEX_WRITES=1", async () => {
++    vi.stubEnv("ZCODE_ACP_TASKS_INDEX_WRITES", "");
++    expect(await upsertSessionTask({ workspaceKey: "/ws", taskId: "t-off", title: "x" })).toBe(false);
++    expect(await renameSessionTask("t-off", "y")).toBe(false);
++    expect(await updateSessionTitle("t-off", "y")).toBe(false);
++    expect(await softDeleteTask({ taskId: "t-off", workspacePath: "/ws" })).toBe(false);
++    expect(await softDeleteWorkspaceTasks("/ws")).toBe(0);
++    expect(await reviveTombstonesOnActivity({ workspacePath: "/ws" })).toBe(0);
++    expect(rows.size).toBe(0);
+   });
+ 
+   describe("upsertSessionTask", () => {
+-- 
+2.43.0
+

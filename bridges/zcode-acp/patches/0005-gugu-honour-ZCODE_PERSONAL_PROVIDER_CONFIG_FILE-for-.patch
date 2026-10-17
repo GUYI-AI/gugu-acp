@@ -1,0 +1,127 @@
+From 99418ba77df2b62b7dd688b65b5f8271cd95bfad Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 14:45:36 +0800
+Subject: [PATCH] gugu: honour ZCODE_PERSONAL_PROVIDER_CONFIG_FILE for the
+ personal provider table
+
+The ZCode backend names its personal provider table through its own
+variable ZCODE_PERSONAL_PROVIDER_CONFIG_FILE (provider-node runtime-paths).
+The bridge always read `<ZCODE_HOME>/v2/provider_config.json` for its
+model menu and, when spawning the backend, overwrote that variable with the
+same default path - so a host could not give one session its own provider
+table without isolating the user's whole ~/.zcode (sessions, skills,
+logins). When the variable is set, the bridge now reads that file and
+passes it on unchanged; unset, nothing changes.
+
+Why: Gugu hands a platform session its own provider table (the Gugu model
+gateway) in a file it owns, leaving the user's ZCode configuration alone.
+
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
+
+Drop when: upstream honours the variable in the tag this is built on.
+---
+ src/utils.ts                           |  6 ++++
+ tests/personal-provider-path.test.ts   | 40 ++++++++++++++++++++++++++
+ tests/resolve-provider-runtime.test.ts | 14 ++++++++-
+ 3 files changed, 59 insertions(+), 1 deletion(-)
+ create mode 100644 tests/personal-provider-path.test.ts
+
+diff --git a/src/utils.ts b/src/utils.ts
+index 3e10d5a..f10feec 100644
+--- a/src/utils.ts
++++ b/src/utils.ts
+@@ -63,6 +63,12 @@ export const ZCODE_CREDS_PATH = path.join(zcodeHomeDir(), "v2", "config.json");
+  * discovery follows a `ZCODE_HOME` change made after import (tests).
+  */
+ export function zcodePersonalProviderPath(): string {
++  // The backend's own variable (packages/provider-node runtime-paths:
++  // ZCODE_PERSONAL_PROVIDER_CONFIG_FILE) names the personal provider table for
++  // one process. A host that sets it (gugu: a per-session table) must see the
++  // bridge read the same file the backend reads, not the user's default one.
++  const explicit = process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE?.trim();
++  if (explicit) return explicit;
+   return path.join(zcodeHomeDir(), "v2", "provider_config.json");
+ }
+ 
+diff --git a/tests/personal-provider-path.test.ts b/tests/personal-provider-path.test.ts
+new file mode 100644
+index 0000000..1837a04
+--- /dev/null
++++ b/tests/personal-provider-path.test.ts
+@@ -0,0 +1,40 @@
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import { afterEach, describe, expect, it, vi } from "vitest";
++
++import { builtinProviderEnv } from "../src/backend/resolve.js";
++import { zcodePersonalProviderPath } from "../src/utils.js";
++
++const dirs: string[] = [];
++afterEach(() => {
++  vi.unstubAllEnvs();
++  for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
++});
++
++describe("personal provider table path", () => {
++  it("follows the backend's own ZCODE_PERSONAL_PROVIDER_CONFIG_FILE when the host sets it", () => {
++    vi.stubEnv("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "/host/session-7/provider_config.json");
++    expect(zcodePersonalProviderPath()).toBe("/host/session-7/provider_config.json");
++  });
++
++  it("defaults to <ZCODE_HOME>/v2/provider_config.json otherwise", () => {
++    vi.stubEnv("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "");
++    vi.stubEnv("ZCODE_HOME", "/data/.zcode");
++    expect(zcodePersonalProviderPath()).toBe(path.join("/data/.zcode", "v2", "provider_config.json"));
++  });
++
++  it("hands the same table to the spawned backend", () => {
++    const app = mkdtempSync(path.join(tmpdir(), "zcode-app-"));
++    dirs.push(app);
++    mkdirSync(path.join(app, "glm"), { recursive: true });
++    mkdirSync(path.join(app, "config", "provider"), { recursive: true });
++    writeFileSync(path.join(app, "glm", "zcode.cjs"), "");
++    writeFileSync(path.join(app, "config", "provider", "zcode-builtin.json"), "{}");
++    vi.stubEnv("ZCODE_PERSONAL_PROVIDER_CONFIG_FILE", "/host/session-7/provider_config.json");
++    expect(builtinProviderEnv(path.join(app, "glm", "zcode.cjs"))).toEqual({
++      ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: path.join(app, "config", "provider", "zcode-builtin.json"),
++      ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: "/host/session-7/provider_config.json",
++    });
++  });
++});
+diff --git a/tests/resolve-provider-runtime.test.ts b/tests/resolve-provider-runtime.test.ts
+index d4a7c32..7bef165 100644
+--- a/tests/resolve-provider-runtime.test.ts
++++ b/tests/resolve-provider-runtime.test.ts
+@@ -115,7 +115,6 @@ describe("builtinProviderEnv", () => {
+   it("overrides an inherited ambient value — version-keyed runtime paths go stale across app updates", () => {
+     const root = scratch;
+     const entry = makeAppBundle(root);
+-    process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE = "/stale/provider_config.json";
+     process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE =
+       "/stale/runtime/provider/3.12.3/endpoint-x/zcode-builtin.json";
+ 
+@@ -125,6 +124,19 @@ describe("builtinProviderEnv", () => {
+     });
+   });
+ 
++  it("keeps an explicit personal table: it is not version-keyed, and a host may name one per session (gugu)", () => {
++    const root = scratch;
++    const entry = makeAppBundle(root);
++    process.env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE = "/host/session-7/provider_config.json";
++    process.env.ZCODE_BUILTIN_PROVIDER_CONFIG_FILE =
++      "/stale/runtime/provider/3.12.3/endpoint-x/zcode-builtin.json";
++
++    expect(builtinProviderEnv(entry)).toEqual({
++      [BUILTIN_PROVIDER_ENV]: path.join(root, "config", "provider", "zcode-builtin.json"),
++      [PERSONAL_PROVIDER_ENV]: "/host/session-7/provider_config.json",
++    });
++  });
++
+   it("returns {} when no provider config exists anywhere (old CLI, PATH install)", () => {
+     const root = scratch;
+     const entry = path.join(root, "zcode.cjs");
+-- 
+2.43.0
+

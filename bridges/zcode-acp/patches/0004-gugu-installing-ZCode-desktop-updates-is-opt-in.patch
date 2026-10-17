@@ -1,0 +1,72 @@
+From 5a878dbcc59a36559241d548376d0d309fd74d73 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 14:25:53 +0800
+Subject: [PATCH 4/4] gugu: installing ZCode desktop updates is opt-in
+
+The remote settings API (`POST /settings/app-update/install`) can download
+a ZCode desktop release from the CDN and swap it into the user's App bundle.
+That route now answers 403 unless ZCODE_ACP_APP_UPDATE_INSTALL=1; the
+read-only check (`GET /settings/app-update`) is unchanged. The route is only
+reachable through the opt-in remote hub, so a plain stdio launch was never
+affected - this makes the rule explicit rather than incidental.
+
+Why: what gets installed on the machine is decided by whoever packages and
+pins this bridge (Gugu), never by a settings call through it.
+
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
+
+Drop when: upstream offers an opt-out we can set, or the remote settings
+API is gone from the tag this is built on.
+---
+ src/remote/settings-endpoint.ts |  7 +++++++
+ tests/settings-api.test.ts      | 15 +++++++++++++++
+ 2 files changed, 22 insertions(+)
+
+diff --git a/src/remote/settings-endpoint.ts b/src/remote/settings-endpoint.ts
+index 9a17932..c055903 100644
+--- a/src/remote/settings-endpoint.ts
++++ b/src/remote/settings-endpoint.ts
+@@ -1898,6 +1898,13 @@ async function handleAppUpdateInstall(
+   res: ServerResponse,
+   body: Record<string, unknown>,
+ ): Promise<void> {
++  // Installing (downloading + swapping the user's ZCode desktop App bundle) is
++  // opt-in (gugu build): the bridge's host decides what gets installed on the
++  // machine, never a settings call. ZCODE_ACP_APP_UPDATE_INSTALL=1 restores it.
++  if (process.env.ZCODE_ACP_APP_UPDATE_INSTALL !== "1") {
++    sendError(res, 403, "installing ZCode updates is disabled in this build");
++    return;
++  }
+   const version = str(body, "version");
+   const url = str(body, "url");
+   const channel = str(body, "channel") ?? "stable";
+diff --git a/tests/settings-api.test.ts b/tests/settings-api.test.ts
+index 52594e2..10b5b96 100644
+--- a/tests/settings-api.test.ts
++++ b/tests/settings-api.test.ts
+@@ -770,6 +770,21 @@ describe("settings API — pending restart and backend restart", () => {
+ });
+ 
+ describe("settings API — app update", () => {
++  // The install route is opt-in (gugu build); these cases exercise it enabled.
++  beforeEach(() => {
++    vi.stubEnv("ZCODE_ACP_APP_UPDATE_INSTALL", "1");
++  });
++
++  it("refuses every install unless ZCODE_ACP_APP_UPDATE_INSTALL=1", async () => {
++    vi.stubEnv("ZCODE_ACP_APP_UPDATE_INSTALL", "");
++    const res = await loopbackSend("POST", "app-update/install", {
++      version: "3.14.3",
++      url: "https://cdn-zcode.z.ai/zcode/electron/releases/3.14.3/macos-arm64/ZCode-3.14.3-mac-arm64.zip",
++    });
++    expect(res.status).toBe(403);
++    expect(((await res.json()) as { error: string }).error).toMatch(/disabled in this build/);
++  });
++
+   /** A temp bundle with a known version, pointed at by ZCODE_APP_PATH. */
+   async function fakeApp(version: string): Promise<string> {
+     const app = await mkdtemp(path.join(tmpdir(), "settings-app-update-"));
+-- 
+2.43.0
+
