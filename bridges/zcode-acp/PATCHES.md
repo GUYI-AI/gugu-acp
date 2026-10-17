@@ -57,6 +57,19 @@ Measurements behind each patch: gugu-base `notes/2026-10-16-zcode-harness/` (ZCo
 - **Upstream code**: `package.json` dependencies, `pnpm-lock.yaml`, and `src/tui.ts` `resolveMarttyJs()` / `runTui()`, which already resolves Martty lazily. Test: `tests/tui.test.ts` ("ships without the martty wrapper").
 - **Check on upgrade**: does anything outside `src/tui.ts` import `zcode-acp-martty`, and are there new dependencies of that size?
 
+## 0007 Accept the personal provider table as content
+
+- **What**: when `ZCODE_PERSONAL_PROVIDER_CONFIG_CONTENT` is set, the bridge does the following at startup, in both `main()` and `runHeadless()`, before the server exists:
+  - writes the content into a private 0600 file in a fresh 0700 temp directory;
+  - points `ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` at it (0005 makes both the menu and the backend read it);
+  - drops the content variable from its own environment, so children never inherit it;
+  - removes the directory on process exit.
+  
+  Content that is not JSON throws. A SIGKILLed bridge leaves the file behind.
+- **Why**: Gugu hands an ACP adapter process its platform-model configuration as one environment variable carrying the whole document, the same carrier it uses for its other harnesses. The ZCode backend only reads a file.
+- **Upstream code**: `src/index.ts` `main()` / `runHeadless()`, right after `installCrashGuards()`. New file `src/config/provider-table-content.ts` (+ `tests/provider-table-content.test.ts`).
+- **Check on upgrade**: both entry points still run it before any provider read or backend spawn.
+
 ## Upgrade checklist
 
 1. `node scripts/build.mjs zcode-acp --tag <new tag>`. A patch that no longer applies stops the build (exit 3).
