@@ -79,6 +79,13 @@ Measurements behind each patch: gugu-base `notes/2026-10-16-zcode-harness/` (ZCo
 - **Upstream code**: `src/config/options.ts` `setConfigOption()` (the `mode` branch after the backend `session/setMode`) and `src/handlers/session.ts` `setConfigOptionHandler()`. The reference behaviour is `src/handlers/extensions.ts` `setMode()`. Test: `tests/set-config-option-plan.test.ts`; its fake backend leaves `settings.mode` alone on plan, like the real runtime.
 - **Check on upgrade**: does upstream route `set_config_option(mode)` through `setMode()`, or fold the plan flag there itself? If so, drop the patch.
 
+## 0009 A session that starts in plan leaves plan into build, not yolo
+
+- **What**: `backendSetMode()` in `src/config/options.ts` is now the one path for `session/set_mode` and `set_config_option(mode)`. When plan is set before the session's first prompt, it first sets `build` underneath and then `plan`. A switch to plan after a prompt (mid-session) is unchanged. `server.promptedSessions` (ACP session ids) is filled at the top of `runPrompt`.
+- **Why**: approving a plan (ExitPlanMode) returns the session to the mode underneath plan. A session whose first mode is plan never chose one, so it left plan into the bridge default, yolo: right after "approve", edits and commands ran without asking. Measured in Gugu on mac1 (gugu#7427 review): a session started in Plan showed Full Access after approval. `build` asks before edits and commands; it is Gugu's "Read Only" rung.
+- **Upstream code**: `src/handlers/extensions.ts` `setMode()` and `src/config/options.ts` `setConfigOption()` (both used to call the backend `session/setMode` directly), `src/server.ts` (new `promptedSessions`), `src/handlers/session.ts` `runPrompt()`. Tests: `tests/set-config-option-plan.test.ts` (three cases: starts in plan via either path → build underneath; mid-session → unchanged); `tests/set-mode-alias.test.ts` "camelCase extension spelling" now reads the last setMode call, since a fresh session gets the build call first.
+- **Check on upgrade**: does upstream pick a non-yolo mode to return to when a session starts in plan, or expose the pre-plan mode? If so, drop the patch. Also check that ExitPlanMode still returns to `settings.mode`.
+
 ## Upgrade checklist
 
 1. `node scripts/build.mjs zcode-acp --tag <new tag>`. A patch that no longer applies stops the build (exit 3).
