@@ -1,0 +1,168 @@
+From 791bb1afed456cde8c102fdb33cf0472d69aab8a Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 16:35:43 +0800
+Subject: [PATCH] gugu: accept the personal provider table as content
+ (ZCODE_PERSONAL_PROVIDER_CONFIG_CONTENT)
+
+A host that hands one bridge process its own provider table can pass the
+whole table in ZCODE_PERSONAL_PROVIDER_CONFIG_CONTENT. At startup (main and
+runHeadless) the bridge writes it into a private 0600 file in a fresh 0700
+temp directory, points ZCODE_PERSONAL_PROVIDER_CONFIG_FILE at it (0005), drops
+the content variable from its own environment so children never inherit it,
+and removes the directory on process exit. Content that is not JSON throws:
+a host that meant to pin the provider must not fall back to the user's own
+table. A SIGKILLed bridge leaves the file behind (no exit hook runs).
+
+Why: Gugu delivers platform-model configuration to an ACP adapter process as
+one environment variable carrying the whole document (the same carrier its
+other harnesses use); the ZCode backend only reads a file.
+
+Measured: an isolated HOME with no provider table, only the content variable
+-> the model menu lists only the session's provider, a turn completes, and
+no zcode-acp-provider-* directory is left after exit.
+
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
+
+Drop when: never while Gugu hands the table as content; re-check on upgrade
+that both entry points (main, runHeadless) still run it before the server
+exists.
+---
+ src/config/provider-table-content.ts | 47 ++++++++++++++++++++++++++++
+ src/index.ts                         |  5 +++
+ tests/provider-table-content.test.ts | 39 +++++++++++++++++++++++
+ 3 files changed, 91 insertions(+)
+ create mode 100644 src/config/provider-table-content.ts
+ create mode 100644 tests/provider-table-content.test.ts
+
+diff --git a/src/config/provider-table-content.ts b/src/config/provider-table-content.ts
+new file mode 100644
+index 0000000..fcc3b00
+--- /dev/null
++++ b/src/config/provider-table-content.ts
+@@ -0,0 +1,47 @@
++/**
++ * A personal provider table handed in through the environment (gugu).
++ *
++ * A host that gives one bridge process its own provider table (gugu: a
++ * platform session on the gugu model gateway) passes the whole table as
++ * ZCODE_PERSONAL_PROVIDER_CONFIG_CONTENT, the way it already hands other
++ * harnesses a config document in one variable. The ZCode backend only reads
++ * a file, so the bridge writes the content once, at startup, into a private
++ * 0600 file in a fresh 0700 directory, points ZCODE_PERSONAL_PROVIDER_CONFIG_FILE
++ * at it (which zcodePersonalProviderPath() and the backend spawn then honour),
++ * drops the content variable from its own environment so children never
++ * inherit it, and deletes the file when the process exits.
++ */
++
++import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import path from "node:path";
++import process from "node:process";
++
++export const PROVIDER_TABLE_CONTENT_ENV = "ZCODE_PERSONAL_PROVIDER_CONFIG_CONTENT";
++
++/**
++ * Materialize the table from the environment. Returns the written path, or
++ * null when the variable is unset. Invalid JSON throws: a host that meant to
++ * pin the provider must not silently fall back to the user's own table.
++ */
++export function materializeProviderTableFromEnv(
++  env: NodeJS.ProcessEnv = process.env,
++  onExit: (cleanup: () => void) => void = (cleanup) => process.once("exit", cleanup),
++): string | null {
++  const content = env[PROVIDER_TABLE_CONTENT_ENV]?.trim();
++  if (!content) return null;
++  try {
++    JSON.parse(content);
++  } catch (e) {
++    throw new Error(
++      `${PROVIDER_TABLE_CONTENT_ENV} is not valid JSON: ${e instanceof Error ? e.message : String(e)}`,
++    );
++  }
++  const dir = mkdtempSync(path.join(tmpdir(), "zcode-acp-provider-"));
++  const file = path.join(dir, "provider_config.json");
++  writeFileSync(file, content, { mode: 0o600 });
++  env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE = file;
++  delete env[PROVIDER_TABLE_CONTENT_ENV];
++  onExit(() => rmSync(dir, { recursive: true, force: true }));
++  return file;
++}
+diff --git a/src/index.ts b/src/index.ts
+index 89fa204..8f0074d 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -41,6 +41,7 @@ import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handler
+ import { loadEarlier } from "./handlers/replay.js";
+ import { resendPendingInteractions } from "./handlers/server-requests.js";
+ import { steering } from "./handlers/steering.js";
++import { materializeProviderTableFromEnv } from "./config/provider-table-content.js";
+ import { loadPluginCommands } from "./config/plugin-commands.js";
+ import { loadSkillCommands } from "./config/skill-discovery.js";
+ import { filterWorkflowCommands } from "./config/workflow-gate.js";
+@@ -85,6 +86,8 @@ export async function main(): Promise<void> {
+   // Crash guards FIRST: any later async task that rejects without a catch
+   // must warn, not kill the process (the whole TUI window dies with us).
+   installCrashGuards();
++  // A provider table handed in by the host (gugu) becomes this process's personal table.
++  materializeProviderTableFromEnv();
+   // Remote config is parsed BEFORE the server exists: a hub-incubated REPL
+   // bridge (ADR-0016) arrives with ZCODE_ACP_REMOTE_PIN_CWD=1, and the pin
+   // must hold from the very first session/new — not from the endpoint start.
+@@ -346,6 +349,8 @@ export async function runHeadless(): Promise<void> {
+   // child driving live remote sessions — a stray unhandled rejection must
+   // warn, not kill every session it hosts.
+   installCrashGuards();
++  // A provider table handed in by the host (gugu) becomes this process's personal table.
++  materializeProviderTableFromEnv();
+   const remoteConfig = parseRemoteConfig();
+   if (!remoteConfig) {
+     warn(
+diff --git a/tests/provider-table-content.test.ts b/tests/provider-table-content.test.ts
+new file mode 100644
+index 0000000..5df5d6b
+--- /dev/null
++++ b/tests/provider-table-content.test.ts
+@@ -0,0 +1,39 @@
++import { existsSync, readFileSync, statSync } from "node:fs";
++import path from "node:path";
++import { describe, expect, it } from "vitest";
++
++import {
++  PROVIDER_TABLE_CONTENT_ENV,
++  materializeProviderTableFromEnv,
++} from "../src/config/provider-table-content.js";
++
++describe("provider table handed in through the environment", () => {
++  it("writes a private 0600 file, points the backend variable at it, drops the content, cleans up on exit", () => {
++    const table = JSON.stringify({ schemaVersion: 1, config: { providerConfigRules: { providerRules: [] } } });
++    const env: NodeJS.ProcessEnv = { [PROVIDER_TABLE_CONTENT_ENV]: table };
++    let cleanup: (() => void) | undefined;
++    const file = materializeProviderTableFromEnv(env, (fn) => {
++      cleanup = fn;
++    });
++    expect(file).not.toBeNull();
++    expect(env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBe(file);
++    expect(env[PROVIDER_TABLE_CONTENT_ENV]).toBeUndefined();
++    expect(readFileSync(file!, "utf8")).toBe(table);
++    expect(statSync(file!).mode & 0o777).toBe(0o600);
++    expect(statSync(path.dirname(file!)).mode & 0o777).toBe(0o700);
++    cleanup!();
++    expect(existsSync(path.dirname(file!))).toBe(false);
++  });
++
++  it("does nothing without the variable", () => {
++    const env: NodeJS.ProcessEnv = {};
++    expect(materializeProviderTableFromEnv(env, () => {})).toBeNull();
++    expect(env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBeUndefined();
++  });
++
++  it("fails loudly on content that is not JSON (never falls back to the user's table)", () => {
++    const env: NodeJS.ProcessEnv = { [PROVIDER_TABLE_CONTENT_ENV]: "{not json" };
++    expect(() => materializeProviderTableFromEnv(env, () => {})).toThrow(/is not valid JSON/);
++    expect(env.ZCODE_PERSONAL_PROVIDER_CONFIG_FILE).toBeUndefined();
++  });
++});
+-- 
+2.43.0
+
