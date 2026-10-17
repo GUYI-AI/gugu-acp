@@ -1,0 +1,159 @@
+From 83a31da1617ed3e39dd67a731ac0e8ffe932e9b0 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 14:17:33 +0800
+Subject: [PATCH 2/4] gugu: do not write the sandbox.json template into the
+ user's workspace
+
+readSandboxConfig() used to create `<workspace>/.zcode/acp/sandbox.json`
+(enabled:false) on first read, and the backend spawn path reads it for
+every workspace, so every project a client opened got a `.zcode/acp/`
+directory. A missing file now simply reads as not armed and nothing is
+written; a user-created file works exactly as before (including fail-closed
+on unreadable / tampered configs).
+
+Why: a client launching the bridge (Gugu) must not leave files in the
+user's repository; measured: a fresh workspace got `.zcode/acp/` after one
+session/new + prompt.
+
+Upstream: matches william0wang/zcode-acp#332 ("Option to not write the
+.zcode/acp/sandbox.json discovery template"); PR draft prepared, filing
+needs the owner's go-ahead.
+
+Drop when: upstream stops auto-creating the template (or adds an opt-out we
+set) in the tag this is built on.
+---
+ src/backend/sandbox.ts | 44 ++++++++++++++----------------------------
+ tests/sandbox.test.ts  |  6 +++---
+ 2 files changed, 17 insertions(+), 33 deletions(-)
+
+diff --git a/src/backend/sandbox.ts b/src/backend/sandbox.ts
+index 612d8e3..dc7fc1d 100644
+--- a/src/backend/sandbox.ts
++++ b/src/backend/sandbox.ts
+@@ -14,8 +14,8 @@
+  *
+  * Arming is dual-switch (see sandboxActive): ZCODE_ACP_SANDBOX=1 forces it
+  * globally, or a workspace opts in via `enabled: true` in its own
+- * .zcode/acp/sandbox.json — the template is auto-created with enabled:false,
+- * so opting in is always an explicit user edit.
++ * .zcode/acp/sandbox.json — the user creates that file; a missing file reads
++ * as not armed, so opting in is always an explicit user edit.
+  *
+  * Whitelist (frozen at spawn, rebuilt on backend restart):
+  * - workspace roots of all live sessions (union of server.sessionCwds)
+@@ -87,7 +87,7 @@ const ZCODE_STATE_DIRS = ["~/.zcode", "~/.zcode-beta", "~/.zcode-plugin"];
+ export interface SandboxConfig {
+   /**
+    * Project-level switch: true arms the sandbox for this workspace without
+-   * the global env. The auto-created template ships false — opting in is an
++   * the global env. A missing file reads as false — opting in is an
+    * explicit user edit.
+    */
+   enabled: boolean;
+@@ -108,8 +108,6 @@ export function sandboxConfigPath(workspaceRoot: string): string {
+   return path.join(workspaceRoot, ".zcode", "acp", "sandbox.json");
+ }
+ 
+-/** Roots whose template auto-creation already failed — warn once, not per call. */
+-const templateFailedRoots = new Set<string>();
+ /** Config issues already warned — once per root(+issue), not per read. */
+ const warnedConfigIssues = new Set<string>();
+ /**
+@@ -130,7 +128,7 @@ function defaultConfig(enabled: boolean): SandboxConfig {
+  * <root>/.zcode/acp/sandbox.json. A symlinked or hardlinked-away config
+  * pierces the deny island: the agent writes the link target inside the
+  * allowed workspace and thereby edits its own allowlist. Missing files are
+- * fine — that is the auto-create path.
++ * fine — that is the not-armed path.
+  */
+ function configIntegrityOk(workspaceRoot: string, file: string): boolean {
+   try {
+@@ -138,15 +136,14 @@ function configIntegrityOk(workspaceRoot: string, file: string): boolean {
+     if (!st.isFile() || st.nlink > 1) return false;
+     return realpathSync(file) === sandboxConfigPath(resolveReal(workspaceRoot));
+   } catch {
+-    return true; // missing (or unreadable parents) → template path
++    return true; // missing (or unreadable parents) → not-armed path
+   }
+ }
+ 
+ /**
+- * Read the project sandbox config, auto-creating the template (enabled:
+- * false) on first touch so the user finds the file and can flip the switch —
+- * the PRESENCE of the file is never the switch, only `enabled` is, so the
+- * auto-create cannot arm anything by itself. A malformed or non-object file
++ * Read the project sandbox config. A missing file reads as not armed and is
++ * NOT created — a read never writes into the user's workspace; the PRESENCE
++ * of the file is never the switch, only `enabled` is. A malformed or non-object file
+  * falls back to enabled:true WITHOUT rewriting it: corruption must fail
+  * CLOSED (the user opted in; losing that to a half-saved file would silently
+  * disarm), and clobbering the user's mid-edit bytes with a template would be
+@@ -171,23 +168,12 @@ export function readSandboxConfig(workspaceRoot: string): SandboxConfig {
+     text = readFileSync(file, "utf8");
+   } catch (e) {
+     const code = (e as NodeJS.ErrnoException).code;
+-    // ENOENT on a never-armed project is the normal pre-template state.
+-    // Everything else — EACCES/ENOTDIR (agent tampered with `.zcode`), or a
+-    // miss on a config this bridge already read as armed — fails closed.
++    // ENOENT on a never-armed project means "not armed": the file is the
++    // user's to create (sandbox.json docs), never written into their
++    // workspace by a read. Everything else — EACCES/ENOTDIR (agent tampered
++    // with `.zcode`), or a miss on a config this bridge already read as
++    // armed — fails closed.
+     if (code === "ENOENT" && lastEnabledSeen.get(file) !== true) {
+-      // Write the discovery template (best-effort; a read-only workspace
+-      // just never gets one — the sandbox can still be env-armed).
+-      if (!templateFailedRoots.has(workspaceRoot)) {
+-        try {
+-          mkdirSync(path.dirname(file), { recursive: true });
+-          writeFileSync(file, JSON.stringify(defaultConfig(false), null, 2) + "\n");
+-        } catch (err) {
+-          templateFailedRoots.add(workspaceRoot);
+-          warn(
+-            `sandbox: could not create ${file}: ${err instanceof Error ? err.message : String(err)}`,
+-          );
+-        }
+-      }
+       return defaultConfig(false);
+     }
+     const issue = code ?? "vanished";
+@@ -465,8 +451,7 @@ function globalWanted(): boolean {
+ 
+ /**
+  * The project-level switch: `enabled: true` inside the workspace's sandbox
+- * config (auto-created on first touch, template ships false). Reading also
+- * materializes the template for discovery. Once the sandbox is armed the
++ * config (missing = not armed; reading never creates it). Once the sandbox is armed the
+  * deny island keeps the agent from flipping the switch back off.
+  */
+ export function projectSandboxEnabled(workspaceRoot: string): boolean {
+@@ -498,7 +483,6 @@ export function sandboxActive(roots: Iterable<string> = [process.cwd()]): boolea
+ /** Test hook: reset cached decisions and warn-once sets. */
+ export function resetSandboxDecisionForTest(): void {
+   platformWarned = false;
+-  templateFailedRoots.clear();
+   warnedConfigIssues.clear();
+   lastEnabledSeen.clear();
+ }
+diff --git a/tests/sandbox.test.ts b/tests/sandbox.test.ts
+index 39985fd..0fc4d92 100644
+--- a/tests/sandbox.test.ts
++++ b/tests/sandbox.test.ts
+@@ -151,11 +151,11 @@ describe("sandboxActive", () => {
+ });
+ 
+ describe("readSandboxConfig / appendSandboxAllow", () => {
+-  it("auto-creates the discovery template (enabled:false) on first read", () => {
++  it("reads a missing config as not armed and writes nothing into the workspace", () => {
+     const cfg = readSandboxConfig(tmpRoot);
+     expect(cfg).toEqual({ enabled: false, allow: [], deny: [], strictGit: false });
+-    const onDisk = JSON.parse(readFileSync(sandboxConfigPath(tmpRoot), "utf8"));
+-    expect(onDisk).toEqual({ enabled: false, allow: [], deny: [], strictGit: false });
++    expect(existsSync(sandboxConfigPath(tmpRoot))).toBe(false);
++    expect(existsSync(path.join(tmpRoot, ".zcode"))).toBe(false);
+   });
+ 
+   it("fails CLOSED on a malformed file and never rewrites the user's bytes", () => {
+-- 
+2.43.0
+

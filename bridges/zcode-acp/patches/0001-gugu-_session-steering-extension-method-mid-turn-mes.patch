@@ -1,0 +1,271 @@
+From 8cdfcde6d4bbc55b172c28edd6db7e68ff6cd904 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 14:15:53 +0800
+Subject: [PATCH 1/4] gugu: _session/steering extension method (mid-turn
+ message injection)
+
+Adds an ACP extension method with the same name and contract as
+@agentclientprotocol/claude-agent-acp's and pi-acp's, so a client can add a
+message to the RUNNING turn instead of preempting it: injected (turn running)
+/ promptRequired + noRunningTurn (idle, client opted in via
+_meta.steering.idleBehavior) / startedNewTurn (idle). The running case uses
+the backend's own steer path, `v4/command sendText` with
+`requestedDelivery: "guide"`: app-server 0.16.9 folds the text into the
+running turn at its next tool boundary - one turn, no cancellation.
+initialize() advertises `_meta.steering.supported = true`.
+
+Why: Gugu delivers group messages that arrive mid-turn this way. Without it a
+second session/prompt preempts the in-flight prompt, which then reports
+`cancelled` although its work went on (measured live: first prompt
+stopReason=cancelled at +8 s, final reply carried both instructions).
+With the patch: first prompt end_turn, steering answered injected at +8 s,
+reply "A-DONE BANANA" (ZCode 3.15.3, CLI 0.16.9).
+
+Upstream: none yet (draft prepared; filing needs the owner's go-ahead).
+
+Drop when: upstream ships `_session/steering` (or an equivalent) in the tag
+this is built on.
+---
+ src/handlers/steering.ts | 93 ++++++++++++++++++++++++++++++++++++++++
+ src/index.ts             | 18 ++++++++
+ src/server.ts            |  3 ++
+ tests/steering.test.ts   | 77 +++++++++++++++++++++++++++++++++
+ 4 files changed, 191 insertions(+)
+ create mode 100644 src/handlers/steering.ts
+ create mode 100644 tests/steering.test.ts
+
+diff --git a/src/handlers/steering.ts b/src/handlers/steering.ts
+new file mode 100644
+index 0000000..e6e8504
+--- /dev/null
++++ b/src/handlers/steering.ts
+@@ -0,0 +1,93 @@
++/**
++ * `_session/steering` — inject a message into the RUNNING turn.
++ *
++ * Same method name and contract as @agentclientprotocol/claude-agent-acp's
++ * extension (and pi-acp's): `injected` while a turn runs; when idle,
++ * `promptRequired` (+ reason `noRunningTurn`) if the client opted in via
++ * `_meta.steering.idleBehavior: "promptRequired"`, else a new turn is started
++ * fire-and-forget and the answer is `startedNewTurn`.
++ *
++ * The running case uses the backend's own steer path: `v4/command sendText`
++ * with `requestedDelivery: "guide"` — the app-server folds the text into the
++ * running turn at its next tool boundary (one turn, no cancellation; verified
++ * live against app-server 0.16.9). A second `session/prompt` instead preempts
++ * the in-flight prompt, which then reports `cancelled` although its work went
++ * on — wrong for a client that only meant to add a message.
++ */
++
++import { randomUUID } from "node:crypto";
++
++import type * as acp from "@agentclientprotocol/sdk";
++import { RequestError } from "@agentclientprotocol/sdk";
++
++import type { ZcodeAcpServer } from "../server.js";
++import { log } from "../utils.js";
++
++export type SteeringOutcome =
++  | { outcome: "injected" }
++  | { outcome: "promptRequired"; reason: "noRunningTurn" }
++  | { outcome: "startedNewTurn" };
++
++export interface SteeringParams {
++  sessionId: string;
++  prompt?: unknown;
++  _meta?: unknown;
++}
++
++/** Concatenate the text of the steering message; only text-like blocks steer. */
++export function steeringText(prompt: unknown): string {
++  if (!Array.isArray(prompt)) return "";
++  const parts: string[] = [];
++  for (const block of prompt as acp.ContentBlock[]) {
++    if (block.type === "text") parts.push(block.text);
++    else if (block.type === "resource" && "text" in block.resource) parts.push(block.resource.text);
++    else throw RequestError.invalidParams(undefined, `_session/steering accepts text only (got ${block.type})`);
++  }
++  return parts.join("\n\n");
++}
++
++export async function steering(
++  server: ZcodeAcpServer,
++  params: SteeringParams,
++  startTurn: (prompt: acp.ContentBlock[]) => Promise<unknown>,
++): Promise<SteeringOutcome> {
++  const text = steeringText(params.prompt);
++  if (!text.trim()) throw RequestError.invalidParams(undefined, "_session/steering requires a text prompt");
++  const zcodeSid = server.resolveSid(params.sessionId);
++  const running =
++    zcodeSid !== undefined && [...server.pendingTurns.values()].some((t) => t.zcodeSid === zcodeSid);
++
++  if (!running) {
++    const meta = params._meta as { steering?: { idleBehavior?: string } } | undefined;
++    if (meta?.steering?.idleBehavior === "promptRequired") {
++      return { outcome: "promptRequired", reason: "noRunningTurn" };
++    }
++    // Fire-and-forget: the steering answer must not wait for a whole turn.
++    startTurn(params.prompt as acp.ContentBlock[]).catch((e: unknown) =>
++      log(`[steering] idle turn failed: ${e instanceof Error ? e.message : String(e)}`),
++    );
++    return { outcome: "startedNewTurn" };
++  }
++
++  const backend = await server.ensureBackend();
++  const resp = await backend.request(server.nextId(), "v4/command", {
++    commandId: randomUUID(),
++    clientId: "zcode-acp-server",
++    sessionId: zcodeSid,
++    type: "sendText",
++    payload: { text, requestedDelivery: "guide" },
++    issuedAt: Date.now(),
++  });
++  if (resp.error) {
++    throw RequestError.internalError(undefined, `steer failed: ${resp.error.message ?? "unknown error"}`);
++  }
++  const ack = (resp.result ?? {}) as { status?: string; reasonCode?: string };
++  if (ack.status !== "accepted" && ack.status !== "duplicate") {
++    throw RequestError.internalError(
++      undefined,
++      `steer ${ack.status ?? "failed"}${ack.reasonCode ? ` (${ack.reasonCode})` : ""}`,
++    );
++  }
++  log(`[steering] guided into running turn of ${zcodeSid}`);
++  return { outcome: "injected" };
++}
+diff --git a/src/index.ts b/src/index.ts
+index 8cf7bbf..89fa204 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -40,6 +40,7 @@ import {
+ import { echoUserPromptToOthers, sendAvailableCommandsDeferred } from "./handlers/io.js";
+ import { loadEarlier } from "./handlers/replay.js";
+ import { resendPendingInteractions } from "./handlers/server-requests.js";
++import { steering } from "./handlers/steering.js";
+ import { loadPluginCommands } from "./config/plugin-commands.js";
+ import { loadSkillCommands } from "./config/skill-discovery.js";
+ import { filterWorkflowCommands } from "./config/workflow-gate.js";
+@@ -251,6 +252,23 @@ function buildAgentApp(server: ZcodeAcpServer, allCommands: ReturnType<typeof bu
+           ctx.client,
+         );
+       })
++      // `_session/steering` (gugu): a message for the RUNNING turn, folded in at
++      // its next tool boundary by the backend's own guide delivery — see
++      // handlers/steering.ts. Same contract as claude-agent-acp / pi-acp.
++      .onRequest(
++        "_session/steering",
++        z.object({ sessionId: z.string(), prompt: z.array(z.unknown()).optional() }).passthrough(),
++        (ctx) =>
++          steering(server, ctx.params, (blocks) =>
++            prompt(
++              server,
++              { sessionId: ctx.params.sessionId, prompt: blocks } as acp.PromptRequest,
++              server.clients.broadcast(),
++              `steering-${server.nextId()}`,
++              ctx.client,
++            ),
++          ),
++      )
+       .onRequest("session/set_config_option", (ctx) =>
+         setConfigOptionHandler(server, ctx.params, server.clients.broadcast()),
+       )
+diff --git a/src/server.ts b/src/server.ts
+index 6052593..271d4b9 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -1153,6 +1153,9 @@ export class ZcodeAcpServer {
+ 
+     return {
+       protocolVersion: PROTOCOL_VERSION,
++      // `_session/steering` is implemented (handlers/steering.ts); advertised
++      // where claude-agent-acp and pi-acp advertise it — the response `_meta`.
++      _meta: { steering: { supported: true } },
+       agentInfo: { ...AGENT_INFO },
+       agentCapabilities: {
+         loadSession: true,
+diff --git a/tests/steering.test.ts b/tests/steering.test.ts
+new file mode 100644
+index 0000000..dbb1049
+--- /dev/null
++++ b/tests/steering.test.ts
+@@ -0,0 +1,77 @@
++import { describe, expect, it, vi } from "vitest";
++
++import { steering } from "../src/handlers/steering.js";
++import type { ZcodeAcpServer } from "../src/server.js";
++
++function makeServer(opts: { running: boolean; ack?: Record<string, unknown>; error?: { message: string } }) {
++  const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
++  let id = 0;
++  const server = {
++    resolveSid: (sid: string) => (sid === "acp_a" ? "sess_z" : undefined),
++    pendingTurns: new Map(opts.running ? [["req0", { zcodeSid: "sess_z" }]] : []),
++    nextId: () => ++id,
++    ensureBackend: async () => ({
++      request: async (rid: number, method: string, params: Record<string, unknown>) => {
++        requests.push({ method, params });
++        return opts.error ? { id: rid, error: opts.error } : { id: rid, result: opts.ack ?? { status: "accepted" } };
++      },
++    }),
++  } as unknown as ZcodeAcpServer;
++  return { server, requests };
++}
++
++const text = (t: string) => [{ type: "text", text: t }];
++
++describe("_session/steering", () => {
++  it("guides the message into the running turn via the backend's own guide delivery", async () => {
++    const { server, requests } = makeServer({ running: true });
++    const startTurn = vi.fn();
++    const out = await steering(server, { sessionId: "acp_a", prompt: text("also say BANANA") }, startTurn);
++    expect(out).toEqual({ outcome: "injected" });
++    expect(startTurn).not.toHaveBeenCalled();
++    expect(requests).toHaveLength(1);
++    expect(requests[0]?.method).toBe("v4/command");
++    expect(requests[0]?.params).toMatchObject({
++      sessionId: "sess_z",
++      type: "sendText",
++      payload: { text: "also say BANANA", requestedDelivery: "guide" },
++    });
++  });
++
++  it("answers promptRequired when idle and the client opted in", async () => {
++    const { server, requests } = makeServer({ running: false });
++    const startTurn = vi.fn();
++    const out = await steering(
++      server,
++      { sessionId: "acp_a", prompt: text("hi"), _meta: { steering: { idleBehavior: "promptRequired" } } },
++      startTurn,
++    );
++    expect(out).toEqual({ outcome: "promptRequired", reason: "noRunningTurn" });
++    expect(startTurn).not.toHaveBeenCalled();
++    expect(requests).toHaveLength(0);
++  });
++
++  it("starts a new turn fire-and-forget when idle without opt-in", async () => {
++    const { server, requests } = makeServer({ running: false });
++    const startTurn = vi.fn(() => new Promise(() => {}));
++    const out = await steering(server, { sessionId: "acp_a", prompt: text("hi") }, startTurn);
++    expect(out).toEqual({ outcome: "startedNewTurn" });
++    expect(startTurn).toHaveBeenCalledWith(text("hi"));
++    expect(requests).toHaveLength(0);
++  });
++
++  it("fails loudly when the backend rejects the steer", async () => {
++    const { server } = makeServer({ running: true, ack: { status: "rejected", reasonCode: "session_closed" } });
++    await expect(steering(server, { sessionId: "acp_a", prompt: text("x") }, vi.fn())).rejects.toThrow(
++      /steer rejected \(session_closed\)/,
++    );
++  });
++
++  it("rejects non-text blocks and empty prompts", async () => {
++    const { server } = makeServer({ running: true });
++    await expect(
++      steering(server, { sessionId: "acp_a", prompt: [{ type: "image", data: "", mimeType: "image/png" }] }, vi.fn()),
++    ).rejects.toThrow(/text only/);
++    await expect(steering(server, { sessionId: "acp_a", prompt: [] }, vi.fn())).rejects.toThrow(/requires a text prompt/);
++  });
++});
+-- 
+2.43.0
+

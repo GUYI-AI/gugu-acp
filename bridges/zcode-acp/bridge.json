@@ -1,0 +1,23 @@
+{
+  "package": "@gugu-acp/zcode-acp",
+  "version": "1.0.0",
+  "upstream": {
+    "repo": "https://github.com/william0wang/zcode-acp",
+    "package": "zcode-acp-server",
+    "tag": "v0.72.0",
+    "commit": "848c1e3a2d92ede79ae6d0bf6025fb9f9f941b05"
+  },
+  "cli": {
+    "name": "zcode",
+    "source": "the ZCode desktop app bundle (resources/glm/zcode.cjs); not published on npm, so follow/ABC run by hand"
+  },
+  "pairing": false,
+  "build": [
+    "npx -y pnpm@10.28.2 install --frozen-lockfile --ignore-scripts",
+    "npx -y pnpm@10.28.2 exec tsc",
+    "node scripts/write-code-fingerprint.mjs"
+  ],
+  "test": [
+    "npx -y pnpm@10.28.2 exec vitest run"
+  ]
+}
