@@ -50,6 +50,13 @@ Measurements behind each patch: gugu-base `notes/2026-10-16-zcode-harness/` (ZCo
 - **Upstream code**: `src/utils.ts` `zcodePersonalProviderPath()`. Its users are `src/config/options.ts` (model menu), `src/backend/resolve.ts` `builtinProviderEnv()` (spawn env) and `src/settings/provider-config.ts`. Tests: `tests/personal-provider-path.test.ts`, plus the new case in `tests/resolve-provider-runtime.test.ts`; the existing "overrides an inherited ambient value" case now covers only the builtin path.
 - **Check on upgrade**: are there new readers of the personal table that bypass `zcodePersonalProviderPath()`? Grep for `provider_config.json`.
 
+## 0006 Ship the ACP server without the terminal UI
+
+- **What**: removes the `zcode-acp-martty` dependency (the bridge's own terminal UI, used only by `zcode-acp tui`) and its lockfile entries. `zcode-acp tui` now fails with "the terminal UI … is not part of this build".
+- **Why**: installing Martty pulls about 190 MB the ACP server never loads: @deepseek-ai/libreoffice-kit (146 MB wasm), sherpa-onnx (32 MB per platform), resvg, @openma/deepseek-harness-acp and more. Gugu ships this bridge inside its app and its server package and only runs the ACP server.
+- **Upstream code**: `package.json` dependencies, `pnpm-lock.yaml`, and `src/tui.ts` `resolveMarttyJs()` / `runTui()`, which already resolves Martty lazily. Test: `tests/tui.test.ts` ("ships without the martty wrapper").
+- **Check on upgrade**: does anything outside `src/tui.ts` import `zcode-acp-martty`, and are there new dependencies of that size?
+
 ## Upgrade checklist
 
 1. `node scripts/build.mjs zcode-acp --tag <new tag>`. A patch that no longer applies stops the build (exit 3).

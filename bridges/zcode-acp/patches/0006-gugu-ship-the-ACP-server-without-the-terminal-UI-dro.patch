@@ -1,0 +1,903 @@
+From b2411328437bea8471c29e78d3c8346fb5856b1a Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 16:18:02 +0800
+Subject: [PATCH] gugu: ship the ACP server without the terminal UI (drop
+ zcode-acp-martty)
+
+`zcode-acp-martty` (the bridge's own terminal UI, used only by
+`zcode-acp tui`) is a regular dependency, and installing it pulls in a large
+native/wasm tree: @deepseek-ai/libreoffice-kit (146 MB wasm), sherpa-onnx
+(32 MB per platform), resvg, @openma/deepseek-harness-acp and more - about
+190 MB that the ACP server never loads. src/tui.ts already resolves Martty
+lazily and handles its absence; the dependency is removed, the "not
+installed" error now says this build has no terminal UI, and the tui test
+pins that.
+
+Why: Gugu ships this bridge inside its app and its server package and only
+runs the ACP server (dist/cli.js with no arguments).
+
+Upstream: not filed - owner 10-17: kept and maintained here only (see
+bridges/zcode-acp/PATCHES.md for the upstream code it touches).
+
+Drop when: never while Gugu only needs the ACP server; re-check on upgrade
+that nothing outside src/tui.ts imports zcode-acp-martty.
+---
+ package.json      |   3 +-
+ pnpm-lock.yaml    | 520 ++++------------------------------------------
+ src/tui.ts        |   4 +-
+ tests/tui.test.ts |   6 +-
+ 4 files changed, 50 insertions(+), 483 deletions(-)
+
+diff --git a/package.json b/package.json
+index 54f4277..bd9349e 100644
+--- a/package.json
++++ b/package.json
+@@ -50,8 +50,7 @@
+   },
+   "dependencies": {
+     "@agentclientprotocol/sdk": "^1.3.0",
+-    "ws": "^8.21.3",
+-    "zcode-acp-martty": "0.3.1-zcode.1"
++    "ws": "^8.21.3"
+   },
+   "peerDependencies": {
+     "zod": "^3.25.0 || ^4.0.0"
+diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
+index 796be08..0ccae03 100644
+--- a/pnpm-lock.yaml
++++ b/pnpm-lock.yaml
+@@ -14,9 +14,6 @@ importers:
+       ws:
+         specifier: ^8.21.3
+         version: 8.21.3
+-      zcode-acp-martty:
+-        specifier: 0.3.1-zcode.1
+-        version: 0.3.1-zcode.1
+     devDependencies:
+       '@eslint/js':
+         specifier: ^9.0.0
+@@ -29,13 +26,13 @@ importers:
+         version: 8.18.1
+       '@typescript-eslint/eslint-plugin':
+         specifier: ^8.0.0
+-        version: 8.62.1(@typescript-eslint/parser@8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++        version: 8.62.1(@typescript-eslint/parser@8.62.1(eslint@9.39.4)(typescript@5.9.3))(eslint@9.39.4)(typescript@5.9.3)
+       '@typescript-eslint/parser':
+         specifier: ^8.0.0
+-        version: 8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++        version: 8.62.1(eslint@9.39.4)(typescript@5.9.3)
+       eslint:
+         specifier: ^9.0.0
+-        version: 9.39.4(supports-color@7.2.0)
++        version: 9.39.4
+       prettier:
+         specifier: ^3.3.0
+         version: 3.9.4
+@@ -44,7 +41,7 @@ importers:
+         version: 5.9.3
+       vitest:
+         specifier: ^2.0.0
+-        version: 2.1.9(@types/node@22.20.0)(supports-color@7.2.0)
++        version: 2.1.9(@types/node@22.20.0)
+       zod:
+         specifier: ^3.25.0
+         version: 3.25.76
+@@ -56,55 +53,6 @@ packages:
+     peerDependencies:
+       zod: ^3.25.0 || ^4.0.0
+ 
+-  '@agentclientprotocol/sdk@1.4.0':
+-    resolution: {integrity: sha512-/eufudw+aFY1LKLolT6yFE6UMmYRl7fMJ/DEONSIyR6wI3slHWITBsANRGqXEY8FRzqUxwh7QEaGiZHcJPVThg==}
+-    peerDependencies:
+-      zod: ^3.25.0 || ^4.0.0
+-
+-  '@deepseek-ai/cordis@4.0.2':
+-    resolution: {integrity: sha512-asOnXP1TzFSFQlHb1iegDZp0z/8WD1c7YNrwJR/Tx2bzNuMXfcekE/I67Iv6SQXeLB4csxqCngzQKANP7gdw0g==}
+-    hasBin: true
+-    peerDependencies:
+-      '@deepseek-ai/cordis-plugin-include': ^1.0.7
+-      '@deepseek-ai/cordis-plugin-loader': ^1.0.3
+-    peerDependenciesMeta:
+-      '@deepseek-ai/cordis-plugin-include':
+-        optional: true
+-      '@deepseek-ai/cordis-plugin-loader':
+-        optional: true
+-
+-  '@deepseek-ai/cosmokit@1.8.3':
+-    resolution: {integrity: sha512-qBo+ronVM6Eu2WNVJXi8JcMiqZ19T9BRIpV+5qJUFPXjGH/Z0QKcQMC/IZJ7L394YTOtJgcovbk9qP0w2GsBXQ==}
+-
+-  '@deepseek-ai/libreoffice-kit-darwin-arm64@0.1.1':
+-    resolution: {integrity: sha512-D6NBvtoNpm9pOgBXGQTdxpds1tYMeiFKhGJgnXF/SE0124ZM8j0AOXI7cZ8CErHctqIoVYP+gKWCrnQl4we41A==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [arm64]
+-    os: [darwin]
+-
+-  '@deepseek-ai/libreoffice-kit-darwin-x64@0.1.1':
+-    resolution: {integrity: sha512-VcAqzmzDbRySLBnpRNYSEd+fDmAtdgL1hQMjRf4sFnQuz7m1vipQ00DtlqFG/T+9uCc20bMIyiDWh8zfYObW3w==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [x64]
+-    os: [darwin]
+-
+-  '@deepseek-ai/libreoffice-kit-wasm@0.1.1':
+-    resolution: {integrity: sha512-YuKZJdDhR/0GeTZUHJsJvachJR8ZiS4lcrL+lxUF2GLRwXcMikN0zAQOA+6kD/nRI+vlHsCkX0KvHaKvfae79Q==}
+-    engines: {node: '>=22.19.0'}
+-    os: [linux]
+-
+-  '@deepseek-ai/libreoffice-kit-win32-arm64@0.1.2':
+-    resolution: {integrity: sha512-+JMKIDfLfpQEIeWWJBkKeAGJ8Niiv6SLQ1SFMh8K28eUOSaLLGPt4j7ywEWtyKCtXenD+VRlKo5gZlqDmCtNCg==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [arm64]
+-    os: [win32]
+-
+-  '@deepseek-ai/libreoffice-kit-win32-x64@0.1.2':
+-    resolution: {integrity: sha512-EUuTMnFF404uVVZz0j2oAoHY0Xhobdg0jChUUm74sudwaqxTM9rvgUYEWbeJd95oVjIParMdsb4hLdAhZ10BIw==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [x64]
+-    os: [win32]
+-
+   '@esbuild/aix-ppc64@0.21.5':
+     resolution: {integrity: sha512-1SDgH6ZSPTlggy1yI6+Dbkiz8xzpHJEVAlF/AM1tHPLsf5STom9rwtjE4hKAF20FfXXNTFqEYXyJNWh1GiZedQ==}
+     engines: {node: '>=12'}
+@@ -301,106 +249,9 @@ packages:
+     resolution: {integrity: sha512-bV0Tgo9K4hfPCek+aMAn81RppFKv2ySDQeMoSZuvTASywNTnVJCArCZE2FWqpvIatKu7VMRLWlR1EazvVhDyhQ==}
+     engines: {node: '>=18.18'}
+ 
+-  '@isaacs/fs-minipass@4.0.1':
+-    resolution: {integrity: sha512-wgm9Ehl2jpeqP3zw/7mo3kRHFp5MEDhqAdwy1fTGkHAwnkGOVsgpvQhL8B5n1qlb01jV3n/bI0ZfZp5lWA1k4w==}
+-    engines: {node: '>=18.0.0'}
+-
+   '@jridgewell/sourcemap-codec@1.5.5':
+     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
+ 
+-  '@lobehub/icons-static-svg@1.95.0':
+-    resolution: {integrity: sha512-VSObF66DUVQe0EK3xbIoFcw+Fcia1+bLVFkMsQbmz0zCceMxPmoLImS5VM5SM7zL+/NarZ11/ySNfkekcomIkQ==}
+-
+-  '@openma/deepseek-harness-acp@0.4.37':
+-    resolution: {integrity: sha512-C0DVNbrY7NMwYK2z5IYgOI67st/X+r6YMKnlaNUQuEnB3sDUAwHUD5sUtnkqVY4sHwm3Ul9XwOA9RmpVPL5MyQ==}
+-    engines: {node: '>=22.15'}
+-    hasBin: true
+-    peerDependencies:
+-      '@deepseek-ai/dsh': '*'
+-    peerDependenciesMeta:
+-      '@deepseek-ai/dsh':
+-        optional: true
+-
+-  '@resvg/resvg-js-android-arm-eabi@2.6.2':
+-    resolution: {integrity: sha512-FrJibrAk6v29eabIPgcTUMPXiEz8ssrAk7TXxsiZzww9UTQ1Z5KAbFJs+Z0Ez+VZTYgnE5IQJqBcoSiMebtPHA==}
+-    engines: {node: '>= 10'}
+-    cpu: [arm]
+-    os: [android]
+-
+-  '@resvg/resvg-js-android-arm64@2.6.2':
+-    resolution: {integrity: sha512-VcOKezEhm2VqzXpcIJoITuvUS/fcjIw5NA/w3tjzWyzmvoCdd+QXIqy3FBGulWdClvp4g+IfUemigrkLThSjAQ==}
+-    engines: {node: '>= 10'}
+-    cpu: [arm64]
+-    os: [android]
+-
+-  '@resvg/resvg-js-darwin-arm64@2.6.2':
+-    resolution: {integrity: sha512-nmok2LnAd6nLUKI16aEB9ydMC6Lidiiq2m1nEBDR1LaaP7FGs4AJ90qDraxX+CWlVuRlvNjyYJTNv8qFjtL9+A==}
+-    engines: {node: '>= 10'}
+-    cpu: [arm64]
+-    os: [darwin]
+-
+-  '@resvg/resvg-js-darwin-x64@2.6.2':
+-    resolution: {integrity: sha512-GInyZLjgWDfsVT6+SHxQVRwNzV0AuA1uqGsOAW+0th56J7Nh6bHHKXHBWzUrihxMetcFDmQMAX1tZ1fZDYSRsw==}
+-    engines: {node: '>= 10'}
+-    cpu: [x64]
+-    os: [darwin]
+-
+-  '@resvg/resvg-js-linux-arm-gnueabihf@2.6.2':
+-    resolution: {integrity: sha512-YIV3u/R9zJbpqTTNwTZM5/ocWetDKGsro0SWp70eGEM9eV2MerWyBRZnQIgzU3YBnSBQ1RcxRZvY/UxwESfZIw==}
+-    engines: {node: '>= 10'}
+-    cpu: [arm]
+-    os: [linux]
+-
+-  '@resvg/resvg-js-linux-arm64-gnu@2.6.2':
+-    resolution: {integrity: sha512-zc2BlJSim7YR4FZDQ8OUoJg5holYzdiYMeobb9pJuGDidGL9KZUv7SbiD4E8oZogtYY42UZEap7dqkkYuA91pg==}
+-    engines: {node: '>= 10'}
+-    cpu: [arm64]
+-    os: [linux]
+-    libc: [glibc]
+-
+-  '@resvg/resvg-js-linux-arm64-musl@2.6.2':
+-    resolution: {integrity: sha512-3h3dLPWNgSsD4lQBJPb4f+kvdOSJHa5PjTYVsWHxLUzH4IFTJUAnmuWpw4KqyQ3NA5QCyhw4TWgxk3jRkQxEKg==}
+-    engines: {node: '>= 10'}
+-    cpu: [arm64]
+-    os: [linux]
+-    libc: [musl]
+-
+-  '@resvg/resvg-js-linux-x64-gnu@2.6.2':
+-    resolution: {integrity: sha512-IVUe+ckIerA7xMZ50duAZzwf1U7khQe2E0QpUxu5MBJNao5RqC0zwV/Zm965vw6D3gGFUl7j4m+oJjubBVoftw==}
+-    engines: {node: '>= 10'}
+-    cpu: [x64]
+-    os: [linux]
+-    libc: [glibc]
+-
+-  '@resvg/resvg-js-linux-x64-musl@2.6.2':
+-    resolution: {integrity: sha512-UOf83vqTzoYQO9SZ0fPl2ZIFtNIz/Rr/y+7X8XRX1ZnBYsQ/tTb+cj9TE+KHOdmlTFBxhYzVkP2lRByCzqi4jQ==}
+-    engines: {node: '>= 10'}
+-    cpu: [x64]
+-    os: [linux]
+-    libc: [musl]
+-
+-  '@resvg/resvg-js-win32-arm64-msvc@2.6.2':
+-    resolution: {integrity: sha512-7C/RSgCa+7vqZ7qAbItfiaAWhyRSoD4l4BQAbVDqRRsRgY+S+hgS3in0Rxr7IorKUpGE69X48q6/nOAuTJQxeQ==}
+-    engines: {node: '>= 10'}
+-    cpu: [arm64]
+-    os: [win32]
+-
+-  '@resvg/resvg-js-win32-ia32-msvc@2.6.2':
+-    resolution: {integrity: sha512-har4aPAlvjnLcil40AC77YDIk6loMawuJwFINEM7n0pZviwMkMvjb2W5ZirsNOZY4aDbo5tLx0wNMREp5Brk+w==}
+-    engines: {node: '>= 10'}
+-    cpu: [ia32]
+-    os: [win32]
+-
+-  '@resvg/resvg-js-win32-x64-msvc@2.6.2':
+-    resolution: {integrity: sha512-ZXtYhtUr5SSaBrUDq7DiyjOFJqBVL/dOBN7N/qmi/pO0IgiWW/f/ue3nbvu9joWE5aAKDoIzy/CxsY0suwGosQ==}
+-    engines: {node: '>= 10'}
+-    cpu: [x64]
+-    os: [win32]
+-
+-  '@resvg/resvg-js@2.6.2':
+-    resolution: {integrity: sha512-xBaJish5OeGmniDj9cW5PRa/PtmuVU3ziqrbr5xJj901ZDN4TosrVaNZpEiLZAxdfnhAe7uQ7QFWfjPe9d9K2Q==}
+-    engines: {node: '>= 10'}
+-
+   '@rollup/rollup-android-arm-eabi@4.62.2':
+     resolution: {integrity: sha512-6o7ZLZK+BeenkZCFNDXqpbjw9bD6nuWonvS/lwQJp7NoVVxm6p3qE7qQ5jGuBjiFsgvqjD8mZAU5oWxTmbOeOg==}
+     cpu: [arm]
+@@ -539,9 +390,6 @@ packages:
+     cpu: [x64]
+     os: [win32]
+ 
+-  '@standard-schema/spec@1.1.0':
+-    resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+-
+   '@types/estree@1.0.9':
+     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
+ 
+@@ -700,10 +548,6 @@ packages:
+     resolution: {integrity: sha512-PAJdDJusoxnwm1VwW07VWwUN1sl7smmC3OKggvndJFadxxDRyFJBX/ggnu/KE4kQAB7a3Dp8f/YXC1FlUprWmA==}
+     engines: {node: '>= 16'}
+ 
+-  chownr@3.0.0:
+-    resolution: {integrity: sha512-+IxzY9BZOQd/XuYPRmrvEVjF/nqj5kgT4kEq7VofrDoM1MxoRjEWkrCC3EtLi59TVawxTAn+orJwFQcrqEN1+g==}
+-    engines: {node: '>=18'}
+-
+   color-convert@2.0.1:
+     resolution: {integrity: sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==}
+     engines: {node: '>=7.0.0'}
+@@ -917,14 +761,6 @@ packages:
+   minimatch@3.1.5:
+     resolution: {integrity: sha512-VgjWUsnnT6n+NUk6eZq77zeFdpW2LWDzP6zFGrCbHXiYNul5Dzqk2HHQ5uFH2DNW5Xbp8+jVzaeNt94ssEEl4w==}
+ 
+-  minipass@7.1.3:
+-    resolution: {integrity: sha512-tEBHqDnIoM/1rXME1zgka9g6Q2lcoCkxHLuc7ODJ5BxbP5d4c2Z5cGgtXAku59200Cx7diuHTOYfSBD8n6mm8A==}
+-    engines: {node: '>=16 || 14 >=14.17'}
+-
+-  minizlib@3.1.0:
+-    resolution: {integrity: sha512-KZxYo1BUkWD2TVFLr0MQoM8vUUigWD3LlD83a/75BqC+4qE0Hb1Vo5v1FgcfaNXvfXzr+5EhQ6ing/CaBijTlw==}
+-    engines: {node: '>= 18'}
+-
+   ms@2.1.3:
+     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
+ 
+@@ -936,11 +772,6 @@ packages:
+   natural-compare@1.4.0:
+     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
+ 
+-  node-downloader-helper@2.1.11:
+-    resolution: {integrity: sha512-882fH2C9AWdiPCwz/2beq5t8FGMZK9Dx8TJUOIxzMCbvG7XUKM5BuJwN5f0NKo4SCQK6jR4p2TPm54mYGdGchQ==}
+-    engines: {node: '>=14.18'}
+-    hasBin: true
+-
+   optionator@0.9.4:
+     resolution: {integrity: sha512-6IpQ7mKUxRcZNLIObR0hz7lxsapSSIYNZJwXPGeF0mTVqGKFIXj1DQcMoT22S3ROcLyY/rz0PWaWZ9ayWmad9g==}
+     engines: {node: '>= 0.8.0'}
+@@ -1018,36 +849,6 @@ packages:
+     resolution: {integrity: sha512-7++dFhtcx3353uBaq8DDR4NuxBetBzC7ZQOhmTQInHEd6bSrXdiEyzCvG07Z44UYdLShWUyXt5M/yhz8ekcb1A==}
+     engines: {node: '>=8'}
+ 
+-  sherpa-onnx-darwin-arm64@1.13.8:
+-    resolution: {integrity: sha512-FPNgJMgnWVl/KhRTIhG3KL3A4Om63Rn4YKXc9/uHY7SzLcvqLJLc/h7UBWJwduXvv7K18t5NpxHR6XgXn4sjWw==}
+-    cpu: [arm64]
+-    os: [darwin]
+-
+-  sherpa-onnx-darwin-x64@1.13.8:
+-    resolution: {integrity: sha512-7BLRpjM6w4f9W46/nmkmq8lEKUayhebvcpslCVQ+6QN2uReYlZEMDZlSpXMjme+hUFrPfRz8P3UNq8ep/4d19g==}
+-    cpu: [x64]
+-    os: [darwin]
+-
+-  sherpa-onnx-linux-arm64@1.13.8:
+-    resolution: {integrity: sha512-Tlg7a70b/Wge3OF8IgTHF9jhSVCsLyKQKhwc4BsJ5A+dL/SrFtGBjzuHp4XeLhiiOT7afCxX5PdSn/D4c8Lnuw==}
+-    cpu: [arm64]
+-    os: [linux]
+-
+-  sherpa-onnx-linux-x64@1.13.8:
+-    resolution: {integrity: sha512-6plnhjagsSeTntCgnlag86hWbs/uZE9Crms1LgOb68/1nKsIQjMd+WG519m+aPwT6TrsBOiEMzrx41t8sL5L5g==}
+-    cpu: [x64]
+-    os: [linux]
+-
+-  sherpa-onnx-win-ia32@1.13.8:
+-    resolution: {integrity: sha512-H0Ojln9hfvM+pxWqW0cnjB/XK8/JPq4/k0IWu2JpY5Z458M3zv+XC3Hu+wmot3AoH/K1Bgt23n/tTKtPV9x8qg==}
+-    cpu: [ia32]
+-    os: [win32]
+-
+-  sherpa-onnx-win-x64@1.13.8:
+-    resolution: {integrity: sha512-oZF1c9VPOKtMwn83Bboc5XSWL+76BRoyB3eUuVnCknBKxwSULZU2Foia9VHWzU+n4I12rPsP6z6H9Rp1hD9o8g==}
+-    cpu: [x64]
+-    os: [win32]
+-
+   siginfo@2.0.0:
+     resolution: {integrity: sha512-ybx0WO1/8bSBLEWXZvEd7gMW3Sn3JFlW3TvX1nREbDLRNQNaeNN8WK0meBwPdAaOI7TtRRRJn/Es1zhrrCHu7g==}
+ 
+@@ -1069,10 +870,6 @@ packages:
+     resolution: {integrity: sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==}
+     engines: {node: '>=8'}
+ 
+-  tar@7.5.22:
+-    resolution: {integrity: sha512-MFO/QzvtAOmJbkhOaCTvbGcFN9L9b+JunIsDwaKljSOdcLMea3NJ1k9Usz/rjdfSXTq4dfzfeS7W4p4YOAAHeA==}
+-    engines: {node: '>=18'}
+-
+   tinybench@2.9.0:
+     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
+ 
+@@ -1203,92 +1000,19 @@ packages:
+       utf-8-validate:
+         optional: true
+ 
+-  yallist@5.0.0:
+-    resolution: {integrity: sha512-YgvUTfwqyc7UXVMrB+SImsVYSmTS8X/tSrtdNZMImM+n7+QTriRXyXim0mBrTXNeqzVF0KWGgHPeiyViFFrNDw==}
+-    engines: {node: '>=18'}
+-
+-  yaml@2.9.1:
+-    resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
+-    engines: {node: '>= 14.6'}
+-    hasBin: true
+-
+   yocto-queue@0.1.0:
+     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
+     engines: {node: '>=10'}
+ 
+-  zcode-acp-martty-darwin-arm64@0.3.1-zcode.1:
+-    resolution: {integrity: sha512-QSPSBBjHZohKfrI08+NVaHT3HQ1OHZ3ZHPqZt9JdKLXJkriEPdOyxMidtn0bA1dp1JaSivU8mwn5w6uKbL3f2A==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [arm64]
+-    os: [darwin]
+-
+-  zcode-acp-martty-darwin-x64@0.3.1-zcode.1:
+-    resolution: {integrity: sha512-cnlcD3gvxnhgIxNJQezLC0ElZda4a0zta+z1kbE2UdCD8+lqx1TVCe3Hxgg5LI1mNrnO5D9BDnGgr/SHdwLwmw==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [x64]
+-    os: [darwin]
+-
+-  zcode-acp-martty-linux-arm64@0.3.1-zcode.1:
+-    resolution: {integrity: sha512-EpV/PrnIpe+fnpubvrIOOXWfZCi0vVhavS32vDZHmlFa6S0FRhjIl/ySTfGyG5JwU11Q8geEI5cR+fLkWenUgQ==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [arm64]
+-    os: [linux]
+-
+-  zcode-acp-martty-linux-x64@0.3.1-zcode.1:
+-    resolution: {integrity: sha512-W2GkamAGvfOiN8xlIyjYXJ5Hb8uVrfsPEZh1Wrs0PJzRx1Eqdi3/fs1Sjahk91TikDw5MBB67Kh6Hth4Ymjsvw==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [x64]
+-    os: [linux]
+-
+-  zcode-acp-martty-win32-x64@0.3.1-zcode.1:
+-    resolution: {integrity: sha512-j3nOFFu6iHv6Tr/CX1BWhPeVcuPbh7Q84/70+Ui7b2d15f1c2nqjxj3wBJkAhNvEqyMUgddLNe5a1N6VfwyWPA==}
+-    engines: {node: '>=22.19.0'}
+-    cpu: [x64]
+-    os: [win32]
+-
+-  zcode-acp-martty@0.3.1-zcode.1:
+-    resolution: {integrity: sha512-KM4S90AMrkfYGkQXy60P5v7XSQMB0tW3unhQV8vMh78BCd73KDdfZOTMvzefVR9ytXY8MjpzE9By1UAb2DfYUQ==}
+-    engines: {node: '>=22.19.0'}
+-    hasBin: true
+-
+   zod@3.25.76:
+     resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
+ 
+-  zod@4.4.3:
+-    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+-
+ snapshots:
+ 
+   '@agentclientprotocol/sdk@1.3.0(zod@3.25.76)':
+     dependencies:
+       zod: 3.25.76
+ 
+-  '@agentclientprotocol/sdk@1.4.0(zod@4.4.3)':
+-    dependencies:
+-      zod: 4.4.3
+-
+-  '@deepseek-ai/cordis@4.0.2':
+-    dependencies:
+-      '@deepseek-ai/cosmokit': 1.8.3
+-      '@standard-schema/spec': 1.1.0
+-
+-  '@deepseek-ai/cosmokit@1.8.3': {}
+-
+-  '@deepseek-ai/libreoffice-kit-darwin-arm64@0.1.1':
+-    optional: true
+-
+-  '@deepseek-ai/libreoffice-kit-darwin-x64@0.1.1':
+-    optional: true
+-
+-  '@deepseek-ai/libreoffice-kit-wasm@0.1.1':
+-    optional: true
+-
+-  '@deepseek-ai/libreoffice-kit-win32-arm64@0.1.2':
+-    optional: true
+-
+-  '@deepseek-ai/libreoffice-kit-win32-x64@0.1.2':
+-    optional: true
+-
+   '@esbuild/aix-ppc64@0.21.5':
+     optional: true
+ 
+@@ -1358,17 +1082,17 @@ snapshots:
+   '@esbuild/win32-x64@0.21.5':
+     optional: true
+ 
+-  '@eslint-community/eslint-utils@4.9.1(eslint@9.39.4(supports-color@7.2.0))':
++  '@eslint-community/eslint-utils@4.9.1(eslint@9.39.4)':
+     dependencies:
+-      eslint: 9.39.4(supports-color@7.2.0)
++      eslint: 9.39.4
+       eslint-visitor-keys: 3.4.3
+ 
+   '@eslint-community/regexpp@4.12.2': {}
+ 
+-  '@eslint/config-array@0.21.2(supports-color@7.2.0)':
++  '@eslint/config-array@0.21.2':
+     dependencies:
+       '@eslint/object-schema': 2.1.7
+-      debug: 4.4.3(supports-color@7.2.0)
++      debug: 4.4.3
+       minimatch: 3.1.5
+     transitivePeerDependencies:
+       - supports-color
+@@ -1381,10 +1105,10 @@ snapshots:
+     dependencies:
+       '@types/json-schema': 7.0.15
+ 
+-  '@eslint/eslintrc@3.3.5(supports-color@7.2.0)':
++  '@eslint/eslintrc@3.3.5':
+     dependencies:
+       ajv: 6.15.0
+-      debug: 4.4.3(supports-color@7.2.0)
++      debug: 4.4.3
+       espree: 10.4.0
+       globals: 14.0.0
+       ignore: 5.3.2
+@@ -1420,84 +1144,8 @@ snapshots:
+ 
+   '@humanwhocodes/retry@0.4.3': {}
+ 
+-  '@isaacs/fs-minipass@4.0.1':
+-    dependencies:
+-      minipass: 7.1.3
+-
+   '@jridgewell/sourcemap-codec@1.5.5': {}
+ 
+-  '@lobehub/icons-static-svg@1.95.0': {}
+-
+-  '@openma/deepseek-harness-acp@0.4.37':
+-    dependencies:
+-      '@agentclientprotocol/sdk': 1.4.0(zod@4.4.3)
+-      tar: 7.5.22
+-      yaml: 2.9.1
+-      zod: 4.4.3
+-    optionalDependencies:
+-      '@deepseek-ai/libreoffice-kit-darwin-arm64': 0.1.1
+-      '@deepseek-ai/libreoffice-kit-darwin-x64': 0.1.1
+-      '@deepseek-ai/libreoffice-kit-wasm': 0.1.1
+-      '@deepseek-ai/libreoffice-kit-win32-arm64': 0.1.2
+-      '@deepseek-ai/libreoffice-kit-win32-x64': 0.1.2
+-      sherpa-onnx-darwin-arm64: 1.13.8
+-      sherpa-onnx-darwin-x64: 1.13.8
+-      sherpa-onnx-linux-arm64: 1.13.8
+-      sherpa-onnx-linux-x64: 1.13.8
+-      sherpa-onnx-win-ia32: 1.13.8
+-      sherpa-onnx-win-x64: 1.13.8
+-
+-  '@resvg/resvg-js-android-arm-eabi@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-android-arm64@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-darwin-arm64@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-darwin-x64@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-linux-arm-gnueabihf@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-linux-arm64-gnu@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-linux-arm64-musl@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-linux-x64-gnu@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-linux-x64-musl@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-win32-arm64-msvc@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-win32-ia32-msvc@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js-win32-x64-msvc@2.6.2':
+-    optional: true
+-
+-  '@resvg/resvg-js@2.6.2':
+-    optionalDependencies:
+-      '@resvg/resvg-js-android-arm-eabi': 2.6.2
+-      '@resvg/resvg-js-android-arm64': 2.6.2
+-      '@resvg/resvg-js-darwin-arm64': 2.6.2
+-      '@resvg/resvg-js-darwin-x64': 2.6.2
+-      '@resvg/resvg-js-linux-arm-gnueabihf': 2.6.2
+-      '@resvg/resvg-js-linux-arm64-gnu': 2.6.2
+-      '@resvg/resvg-js-linux-arm64-musl': 2.6.2
+-      '@resvg/resvg-js-linux-x64-gnu': 2.6.2
+-      '@resvg/resvg-js-linux-x64-musl': 2.6.2
+-      '@resvg/resvg-js-win32-arm64-msvc': 2.6.2
+-      '@resvg/resvg-js-win32-ia32-msvc': 2.6.2
+-      '@resvg/resvg-js-win32-x64-msvc': 2.6.2
+-
+   '@rollup/rollup-android-arm-eabi@4.62.2':
+     optional: true
+ 
+@@ -1573,8 +1221,6 @@ snapshots:
+   '@rollup/rollup-win32-x64-msvc@4.62.2':
+     optional: true
+ 
+-  '@standard-schema/spec@1.1.0': {}
+-
+   '@types/estree@1.0.9': {}
+ 
+   '@types/json-schema@7.0.15': {}
+@@ -1587,15 +1233,15 @@ snapshots:
+     dependencies:
+       '@types/node': 22.20.0
+ 
+-  '@typescript-eslint/eslint-plugin@8.62.1(@typescript-eslint/parser@8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3))(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)':
++  '@typescript-eslint/eslint-plugin@8.62.1(@typescript-eslint/parser@8.62.1(eslint@9.39.4)(typescript@5.9.3))(eslint@9.39.4)(typescript@5.9.3)':
+     dependencies:
+       '@eslint-community/regexpp': 4.12.2
+-      '@typescript-eslint/parser': 8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++      '@typescript-eslint/parser': 8.62.1(eslint@9.39.4)(typescript@5.9.3)
+       '@typescript-eslint/scope-manager': 8.62.1
+-      '@typescript-eslint/type-utils': 8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
+-      '@typescript-eslint/utils': 8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
++      '@typescript-eslint/type-utils': 8.62.1(eslint@9.39.4)(typescript@5.9.3)
++      '@typescript-eslint/utils': 8.62.1(eslint@9.39.4)(typescript@5.9.3)
+       '@typescript-eslint/visitor-keys': 8.62.1
+-      eslint: 9.39.4(supports-color@7.2.0)
++      eslint: 9.39.4
+       ignore: 7.0.5
+       natural-compare: 1.4.0
+       ts-api-utils: 2.5.0(typescript@5.9.3)
+@@ -1603,23 +1249,23 @@ snapshots:
+     transitivePeerDependencies:
+       - supports-color
+ 
+-  '@typescript-eslint/parser@8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)':
++  '@typescript-eslint/parser@8.62.1(eslint@9.39.4)(typescript@5.9.3)':
+     dependencies:
+       '@typescript-eslint/scope-manager': 8.62.1
+       '@typescript-eslint/types': 8.62.1
+-      '@typescript-eslint/typescript-estree': 8.62.1(supports-color@7.2.0)(typescript@5.9.3)
++      '@typescript-eslint/typescript-estree': 8.62.1(typescript@5.9.3)
+       '@typescript-eslint/visitor-keys': 8.62.1
+-      debug: 4.4.3(supports-color@7.2.0)
+-      eslint: 9.39.4(supports-color@7.2.0)
++      debug: 4.4.3
++      eslint: 9.39.4
+       typescript: 5.9.3
+     transitivePeerDependencies:
+       - supports-color
+ 
+-  '@typescript-eslint/project-service@8.62.1(supports-color@7.2.0)(typescript@5.9.3)':
++  '@typescript-eslint/project-service@8.62.1(typescript@5.9.3)':
+     dependencies:
+       '@typescript-eslint/tsconfig-utils': 8.62.1(typescript@5.9.3)
+       '@typescript-eslint/types': 8.62.1
+-      debug: 4.4.3(supports-color@7.2.0)
++      debug: 4.4.3
+       typescript: 5.9.3
+     transitivePeerDependencies:
+       - supports-color
+@@ -1633,13 +1279,13 @@ snapshots:
+     dependencies:
+       typescript: 5.9.3
+ 
+-  '@typescript-eslint/type-utils@8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)':
++  '@typescript-eslint/type-utils@8.62.1(eslint@9.39.4)(typescript@5.9.3)':
+     dependencies:
+       '@typescript-eslint/types': 8.62.1
+-      '@typescript-eslint/typescript-estree': 8.62.1(supports-color@7.2.0)(typescript@5.9.3)
+-      '@typescript-eslint/utils': 8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)
+-      debug: 4.4.3(supports-color@7.2.0)
+-      eslint: 9.39.4(supports-color@7.2.0)
++      '@typescript-eslint/typescript-estree': 8.62.1(typescript@5.9.3)
++      '@typescript-eslint/utils': 8.62.1(eslint@9.39.4)(typescript@5.9.3)
++      debug: 4.4.3
++      eslint: 9.39.4
+       ts-api-utils: 2.5.0(typescript@5.9.3)
+       typescript: 5.9.3
+     transitivePeerDependencies:
+@@ -1647,13 +1293,13 @@ snapshots:
+ 
+   '@typescript-eslint/types@8.62.1': {}
+ 
+-  '@typescript-eslint/typescript-estree@8.62.1(supports-color@7.2.0)(typescript@5.9.3)':
++  '@typescript-eslint/typescript-estree@8.62.1(typescript@5.9.3)':
+     dependencies:
+-      '@typescript-eslint/project-service': 8.62.1(supports-color@7.2.0)(typescript@5.9.3)
++      '@typescript-eslint/project-service': 8.62.1(typescript@5.9.3)
+       '@typescript-eslint/tsconfig-utils': 8.62.1(typescript@5.9.3)
+       '@typescript-eslint/types': 8.62.1
+       '@typescript-eslint/visitor-keys': 8.62.1
+-      debug: 4.4.3(supports-color@7.2.0)
++      debug: 4.4.3
+       minimatch: 10.2.5
+       semver: 7.8.5
+       tinyglobby: 0.2.17
+@@ -1662,13 +1308,13 @@ snapshots:
+     transitivePeerDependencies:
+       - supports-color
+ 
+-  '@typescript-eslint/utils@8.62.1(eslint@9.39.4(supports-color@7.2.0))(supports-color@7.2.0)(typescript@5.9.3)':
++  '@typescript-eslint/utils@8.62.1(eslint@9.39.4)(typescript@5.9.3)':
+     dependencies:
+-      '@eslint-community/eslint-utils': 4.9.1(eslint@9.39.4(supports-color@7.2.0))
++      '@eslint-community/eslint-utils': 4.9.1(eslint@9.39.4)
+       '@typescript-eslint/scope-manager': 8.62.1
+       '@typescript-eslint/types': 8.62.1
+-      '@typescript-eslint/typescript-estree': 8.62.1(supports-color@7.2.0)(typescript@5.9.3)
+-      eslint: 9.39.4(supports-color@7.2.0)
++      '@typescript-eslint/typescript-estree': 8.62.1(typescript@5.9.3)
++      eslint: 9.39.4
+       typescript: 5.9.3
+     transitivePeerDependencies:
+       - supports-color
+@@ -1771,8 +1417,6 @@ snapshots:
+ 
+   check-error@2.1.3: {}
+ 
+-  chownr@3.0.0: {}
+-
+   color-convert@2.0.1:
+     dependencies:
+       color-name: 1.1.4
+@@ -1787,11 +1431,9 @@ snapshots:
+       shebang-command: 2.0.0
+       which: 2.0.2
+ 
+-  debug@4.4.3(supports-color@7.2.0):
++  debug@4.4.3:
+     dependencies:
+       ms: 2.1.3
+-    optionalDependencies:
+-      supports-color: 7.2.0
+ 
+   deep-eql@5.0.2: {}
+ 
+@@ -1838,14 +1480,14 @@ snapshots:
+ 
+   eslint-visitor-keys@5.0.1: {}
+ 
+-  eslint@9.39.4(supports-color@7.2.0):
++  eslint@9.39.4:
+     dependencies:
+-      '@eslint-community/eslint-utils': 4.9.1(eslint@9.39.4(supports-color@7.2.0))
++      '@eslint-community/eslint-utils': 4.9.1(eslint@9.39.4)
+       '@eslint-community/regexpp': 4.12.2
+-      '@eslint/config-array': 0.21.2(supports-color@7.2.0)
++      '@eslint/config-array': 0.21.2
+       '@eslint/config-helpers': 0.4.2
+       '@eslint/core': 0.17.0
+-      '@eslint/eslintrc': 3.3.5(supports-color@7.2.0)
++      '@eslint/eslintrc': 3.3.5
+       '@eslint/js': 9.39.4
+       '@eslint/plugin-kit': 0.4.1
+       '@humanfs/node': 0.16.8
+@@ -1855,7 +1497,7 @@ snapshots:
+       ajv: 6.15.0
+       chalk: 4.1.2
+       cross-spawn: 7.0.6
+-      debug: 4.4.3(supports-color@7.2.0)
++      debug: 4.4.3
+       escape-string-regexp: 4.0.0
+       eslint-scope: 8.4.0
+       eslint-visitor-keys: 4.2.1
+@@ -1996,20 +1638,12 @@ snapshots:
+     dependencies:
+       brace-expansion: 1.1.15
+ 
+-  minipass@7.1.3: {}
+-
+-  minizlib@3.1.0:
+-    dependencies:
+-      minipass: 7.1.3
+-
+   ms@2.1.3: {}
+ 
+   nanoid@3.3.15: {}
+ 
+   natural-compare@1.4.0: {}
+ 
+-  node-downloader-helper@2.1.11: {}
+-
+   optionator@0.9.4:
+     dependencies:
+       deep-is: 0.1.4
+@@ -2096,24 +1730,6 @@ snapshots:
+ 
+   shebang-regex@3.0.0: {}
+ 
+-  sherpa-onnx-darwin-arm64@1.13.8:
+-    optional: true
+-
+-  sherpa-onnx-darwin-x64@1.13.8:
+-    optional: true
+-
+-  sherpa-onnx-linux-arm64@1.13.8:
+-    optional: true
+-
+-  sherpa-onnx-linux-x64@1.13.8:
+-    optional: true
+-
+-  sherpa-onnx-win-ia32@1.13.8:
+-    optional: true
+-
+-  sherpa-onnx-win-x64@1.13.8:
+-    optional: true
+-
+   siginfo@2.0.0: {}
+ 
+   source-map-js@1.2.1: {}
+@@ -2128,14 +1744,6 @@ snapshots:
+     dependencies:
+       has-flag: 4.0.0
+ 
+-  tar@7.5.22:
+-    dependencies:
+-      '@isaacs/fs-minipass': 4.0.1
+-      chownr: 3.0.0
+-      minipass: 7.1.3
+-      minizlib: 3.1.0
+-      yallist: 5.0.0
+-
+   tinybench@2.9.0: {}
+ 
+   tinyexec@0.3.2: {}
+@@ -2167,10 +1775,10 @@ snapshots:
+     dependencies:
+       punycode: 2.3.1
+ 
+-  vite-node@2.1.9(@types/node@22.20.0)(supports-color@7.2.0):
++  vite-node@2.1.9(@types/node@22.20.0):
+     dependencies:
+       cac: 6.7.14
+-      debug: 4.4.3(supports-color@7.2.0)
++      debug: 4.4.3
+       es-module-lexer: 1.7.0
+       pathe: 1.1.2
+       vite: 5.4.21(@types/node@22.20.0)
+@@ -2194,7 +1802,7 @@ snapshots:
+       '@types/node': 22.20.0
+       fsevents: 2.3.3
+ 
+-  vitest@2.1.9(@types/node@22.20.0)(supports-color@7.2.0):
++  vitest@2.1.9(@types/node@22.20.0):
+     dependencies:
+       '@vitest/expect': 2.1.9
+       '@vitest/mocker': 2.1.9(vite@5.4.21(@types/node@22.20.0))
+@@ -2204,7 +1812,7 @@ snapshots:
+       '@vitest/spy': 2.1.9
+       '@vitest/utils': 2.1.9
+       chai: 5.3.3
+-      debug: 4.4.3(supports-color@7.2.0)
++      debug: 4.4.3
+       expect-type: 1.4.0
+       magic-string: 0.30.21
+       pathe: 1.1.2
+@@ -2214,7 +1822,7 @@ snapshots:
+       tinypool: 1.1.1
+       tinyrainbow: 1.2.0
+       vite: 5.4.21(@types/node@22.20.0)
+-      vite-node: 2.1.9(@types/node@22.20.0)(supports-color@7.2.0)
++      vite-node: 2.1.9(@types/node@22.20.0)
+       why-is-node-running: 2.3.0
+     optionalDependencies:
+       '@types/node': 22.20.0
+@@ -2242,46 +1850,6 @@ snapshots:
+ 
+   ws@8.21.3: {}
+ 
+-  yallist@5.0.0: {}
+-
+-  yaml@2.9.1: {}
+-
+   yocto-queue@0.1.0: {}
+ 
+-  zcode-acp-martty-darwin-arm64@0.3.1-zcode.1:
+-    optional: true
+-
+-  zcode-acp-martty-darwin-x64@0.3.1-zcode.1:
+-    optional: true
+-
+-  zcode-acp-martty-linux-arm64@0.3.1-zcode.1:
+-    optional: true
+-
+-  zcode-acp-martty-linux-x64@0.3.1-zcode.1:
+-    optional: true
+-
+-  zcode-acp-martty-win32-x64@0.3.1-zcode.1:
+-    optional: true
+-
+-  zcode-acp-martty@0.3.1-zcode.1:
+-    dependencies:
+-      '@deepseek-ai/cordis': 4.0.2
+-      '@lobehub/icons-static-svg': 1.95.0
+-      '@openma/deepseek-harness-acp': 0.4.37
+-      '@resvg/resvg-js': 2.6.2
+-      cross-spawn: 7.0.6
+-      node-downloader-helper: 2.1.11
+-    optionalDependencies:
+-      zcode-acp-martty-darwin-arm64: 0.3.1-zcode.1
+-      zcode-acp-martty-darwin-x64: 0.3.1-zcode.1
+-      zcode-acp-martty-linux-arm64: 0.3.1-zcode.1
+-      zcode-acp-martty-linux-x64: 0.3.1-zcode.1
+-      zcode-acp-martty-win32-x64: 0.3.1-zcode.1
+-    transitivePeerDependencies:
+-      - '@deepseek-ai/cordis-plugin-include'
+-      - '@deepseek-ai/cordis-plugin-loader'
+-      - '@deepseek-ai/dsh'
+-
+   zod@3.25.76: {}
+-
+-  zod@4.4.3: {}
+diff --git a/src/tui.ts b/src/tui.ts
+index cbf58d5..7fe5221 100644
+--- a/src/tui.ts
++++ b/src/tui.ts
+@@ -74,7 +74,9 @@ export function buildTuiArgs(
+ export async function runTui(): Promise<void> {
+   const marttyJs = resolveMarttyJs();
+   if (!marttyJs) {
+-    throw new Error("martty is not installed — reinstall the zcode-acp-server package");
++    // gugu build (@gugu-acp/zcode-acp): only the ACP server ships; the terminal UI
++    // (zcode-acp-martty and its large native/wasm tree) is left out on purpose.
++    throw new Error("the terminal UI (zcode-acp-martty) is not part of this build — install upstream zcode-acp-server for `zcode-acp tui`");
+   }
+   seedMarttyQuotaPlugin();
+   // Martty's stats-view plugin reads DSH_TUI_STATS once at its process start
+diff --git a/tests/tui.test.ts b/tests/tui.test.ts
+index 14114af..75ec728 100644
+--- a/tests/tui.test.ts
++++ b/tests/tui.test.ts
+@@ -11,10 +11,8 @@ import { describe, expect, it } from "vitest";
+ import { agentEntryJs, buildTuiArgs, resolveMarttyJs } from "../src/tui.js";
+ 
+ describe("martty launcher", () => {
+-  it("resolves the bundled martty wrapper (regular dependency)", () => {
+-    expect(resolveMarttyJs()).toMatch(
+-      /zcode-acp-martty[/\\]bin[/\\]martty\.js$/,
+-    );
++  it("ships without the martty wrapper in the gugu build (ACP server only)", () => {
++    expect(resolveMarttyJs()).toBeNull();
+   });
+ 
+   it("wires the bridge as the agent over the absolute node binary", () => {
+-- 
+2.43.0
+
