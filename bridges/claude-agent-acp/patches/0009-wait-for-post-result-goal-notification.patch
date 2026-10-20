@@ -1,0 +1,47 @@
+From 0317cb6c934aec897ee31fcf7e7bba610e29f810 Mon Sep 17 00:00:00 2001
+From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 22:32:39 +0800
+Subject: [PATCH] Wait for post-result goal notifications in the runtime test
+
+Why: prompt() settles on result before the following active_goal frame is consumed; the assertion races the SDK pump in CI. Delaying that frame by one event-loop turn reproduces the old failure deterministically. Wait for the notification while retaining the settlement and payload assertions.
+
+Upstream: test-only correction for the v0.89.1 active_goal test; not submitted upstream.
+Drop: when the pinned upstream test observes post-result notifications asynchronously.
+---
+ src/tests/acp-agent.test.ts | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
+index 6b8d0af..451c34e 100644
+--- a/src/tests/acp-agent.test.ts
++++ b/src/tests/acp-agent.test.ts
+@@ -7922,6 +7922,8 @@ describe("stop reason propagation", () => {
+           session_id: "test-session",
+         };
+         yield createResultMessage({ subtype: "success", stop_reason: "end_turn", is_error: false });
++        // A later SDK frame need not arrive in the prompt settlement's microtask.
++        await new Promise<void>((resolve) => setImmediate(resolve));
+         yield {
+           type: "active_goal",
+           value: null,
+@@ -7957,13 +7959,15 @@ describe("stop reason propagation", () => {
+         },
+       },
+     });
+-    expect(updates).toContainEqual({
++    // The result settles prompt() before the SDK pump consumes the following
++    // active_goal frame. Observe that notification, not a microtask ordering.
++    await vi.waitFor(() => expect(updates).toContainEqual({
+       sessionId: "test-session",
+       update: {
+         sessionUpdate: "session_info_update",
+         _meta: { jetbrains: { air: { version: 1, goal: null } } },
+       },
+-    });
++    }));
+     expect(updates.some((notification) => notification.update?._meta?.claudeCode?.goal)).toBe(
+       false,
+     );
+-- 
+2.44.0
+
