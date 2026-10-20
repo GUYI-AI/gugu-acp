@@ -1,0 +1,133 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
+Date: Tue, 20 Oct 2026 19:26:55 +0800
+Subject: [PATCH] Preserve Gugu's opt-in incremental MCP argument previews
+
+Why: Gugu already ships this behavior for #7536 as a dependency patch.
+Keep it in the source build when taking the repeated-message-start fix,
+so upgrading the bridge does not remove incremental MCP text previews.
+
+Upstream: none yet; preserves the behavior shipped by Gugu #7536.
+Drop: when upstream supports opt-in incremental MCP string previews,
+including AIR clients, with equivalent split-escape regression tests.
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index df62fbe..92f214a 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -1,3 +1,4 @@
++import { partialMcpInput } from "./partial-mcp-input.js";
+ import {
+   agent as acpAgent,
+   AgentApp,
+@@ -11740,11 +11741,12 @@ export function streamEventToAcpNotifications(
+           if (inputsForMessage?.size === 0) streamedToolInputs?.delete(streamKey);
+           return [];
+         }
+-        if (streamedInput.lastTopLevelComma <= streamedInput.emittedThroughComma) {
++        const stringInput = partialMcpInput(streamedInput.name, streamedInput.partialJson, streamedInput.inString);
++        if (!stringInput && streamedInput.lastTopLevelComma <= streamedInput.emittedThroughComma) {
+           return [];
+         }
+         streamedInput.emittedThroughComma = streamedInput.lastTopLevelComma;
+-        const input = recoveredToolInput(
++        const input = stringInput ?? recoveredToolInput(
+           streamedInput.partialJson.slice(0, streamedInput.lastTopLevelComma),
+         );
+         if (!input) return [];
+diff --git a/src/partial-mcp-input.ts b/src/partial-mcp-input.ts
+new file mode 100644
+index 0000000..995ec89
+--- /dev/null
++++ b/src/partial-mcp-input.ts
+@@ -0,0 +1,16 @@
++/** Recover an in-progress top-level MCP string without inventing its remaining text.
++ * Other tools retain their field-boundary rendering (large Write inputs in particular).
++ * JSON.parse remains the validator; incomplete keys, nested objects and invalid escapes
++ * produce no preview. A split escape waits until the next provider fragment.
++ */
++export function partialMcpInput(name: string, json: string, inString: boolean): Record<string, unknown> | undefined {
++  if (!name.startsWith("mcp__")) return undefined;
++  const candidates = inString ? [json + '\"}', ...(json.endsWith('\\') ? [json.slice(0, -1) + '\"}'] : [])] : [json + "}"];
++  for (const candidate of candidates) {
++    try {
++      const value = JSON.parse(candidate);
++      if (value && typeof value === "object" && !Array.isArray(value)) return value;
++    } catch { /* A partial escape/key is not a complete value. */ }
++  }
++  return undefined;
++}
+diff --git a/src/tests/partial-mcp-input.test.ts b/src/tests/partial-mcp-input.test.ts
+new file mode 100644
+index 0000000..0078a9d
+--- /dev/null
++++ b/src/tests/partial-mcp-input.test.ts
+@@ -0,0 +1,23 @@
++import { describe, expect, it } from 'vitest'
++import { partialMcpInput } from '../partial-mcp-input.js'
++import { ClientCapabilities } from '../tool-calls/client-capabilities.js'
++
++/** Preserve the MCP preview behavior shipped by Gugu #7536. */
++describe('the shipped ACP bridge previews MCP arguments (#7536)', () => {
++  it('publishes actual growing text and waits for split escapes without guessing', () => {
++    const call = 'mcp__gugu__message_send'
++    expect(partialMcpInput(call, '{"chat_id":"chat","text":"你', true)).toEqual({ chat_id: 'chat', text: '你' })
++    expect(partialMcpInput(call, '{"chat_id":"chat","text":"你好', true)).toEqual({ chat_id: 'chat', text: '你好' })
++    expect(partialMcpInput(call, '{"text":"line\\', true)).toEqual({ text: 'line' })
++    expect(partialMcpInput(call, '{"text":"line\\n', true)).toEqual({ text: 'line\n' })
++    expect(partialMcpInput(call, '{"text":"\\u4f', true)).toBeUndefined()
++    expect(partialMcpInput(call, '{"nested":{"text":"unfinished', true)).toBeUndefined()
++    expect(partialMcpInput('Write', '{"content":"unfinished', true)).toBeUndefined()
++  })
++  it('requires the AIR client to explicitly opt into incremental argument previews', () => {
++    const air = { _meta: { 'jetbrains': { air: {} } } }
++    expect(ClientCapabilities.from(air).air.client).toBe(true)
++    expect(ClientCapabilities.from(air).partialMcpInput).toBe(false)
++    expect(ClientCapabilities.from({ ...air, _meta: { ...air._meta, 'gugu.mcp-input-preview': true } }).partialMcpInput).toBe(true)
++  })
++})
+diff --git a/src/tool-calls/client-capabilities.ts b/src/tool-calls/client-capabilities.ts
+index ba771f1..87c755d 100644
+--- a/src/tool-calls/client-capabilities.ts
++++ b/src/tool-calls/client-capabilities.ts
+@@ -33,6 +33,8 @@ export class ClientCapabilities {
+      * sends as display terminals.
+      */
+     readonly v2: boolean = false,
++    /** Opt-in to incremental MCP argument previews, including AIR clients. */
++    readonly partialMcpInput: boolean = false,
+   ) {}
+ 
+   static from(
+@@ -54,6 +56,7 @@ export class ClientCapabilities {
+         planFile: clientSupportsAirCapability(capabilities, AIR_PLAN_FILE_CAPABILITY),
+       },
+       v2,
++      meta?.["gugu.mcp-input-preview"] === true,
+     );
+   }
+ }
+diff --git a/src/tool-calls/renderer.ts b/src/tool-calls/renderer.ts
+index b42b85d..acf80e2 100644
+--- a/src/tool-calls/renderer.ts
++++ b/src/tool-calls/renderer.ts
+@@ -243,8 +243,8 @@ export class AcpToolCallRenderer {
+    * The report of a tool call from the complete top-level fields of its still
+    * streaming input. It carries no content: content built from partial input
+    * is misleading (an Edit without its `new_string` renders as a deletion) or
+-   * invalid. AIR gets no `rawInput`, which goes out once it is complete. Every
+-   * other client gets the partial input as `rawInput`.
++   * invalid. AIR waits for complete input unless it opts into MCP argument
++   * previews. File tools retain the original field-boundary behavior.
+    */
+   partialRefinement(toolUse: Pick<ToolUse, "id" | "name">, input: unknown, cwd?: string) {
+     const facts = this.facts({ name: toolUse.name, input }, cwd);
+@@ -252,7 +252,7 @@ export class AcpToolCallRenderer {
+       _meta: this.toolUseMeta({ name: toolUse.name, input }, cwd),
+       toolCallId: toolUse.id,
+       sessionUpdate: "tool_call_update",
+-      ...(this.capabilities.air.client ? {} : { rawInput: input }),
++      ...(!this.capabilities.air.client || (this.capabilities.partialMcpInput && toolUse.name.startsWith("mcp__")) ? { rawInput: input } : {}),
+       title: facts.title,
+       kind: facts.kind,
+       ...(facts.locations ? { locations: facts.locations } : {}),
