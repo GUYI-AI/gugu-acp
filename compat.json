@@ -97,6 +97,24 @@
           ]
         }
       ]
+    },
+    "claude-agent-acp-v2": {
+      "package": "@gugu-acp/claude-agent-acp",
+      "cli": "claude",
+      "releases": [
+        {
+          "version": "1.5.0",
+          "upstreamTag": "v0.94.1-preview.4",
+          "cliFrom": "2.1.307",
+          "verified": [
+            {
+              "cli": "2.1.307",
+              "at": "2026-10-22",
+              "how": "abc v2 (ThinkPad, build = patches on v0.94.1-preview.4, model through the CLI's own login; B ended 5.2 s into a 15 s background subagent)"
+            }
+          ]
+        }
+      ]
     }
   }
 }
