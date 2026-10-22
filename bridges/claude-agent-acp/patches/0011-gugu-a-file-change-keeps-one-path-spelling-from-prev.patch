@@ -1,0 +1,117 @@
+From b1f1b67fb8f88e302278097d04bd003e21f89a03 Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <shuxue@protonmail.com>
+Date: Thu, 22 Oct 2026 12:29:43 -0700
+Subject: [PATCH] gugu: a file change keeps one path spelling from preview to
+ result
+
+Over ACP v2 the agent previews a file change from the tool input before the
+tool runs, and reports the change from the tool response after it. On
+Windows the input spells the path `D:\w\a.txt` and the response `D:/w/a.txt`,
+so a client that keys a file row by its path showed each written file twice
+("edited 4 files" for one Write and one Edit). The preview already resolved
+the input path; the result now goes through the same resolution, which
+normalizes the separators.
+---
+ src/diff.ts                  | 21 ++++++++++++++-------
+ src/tests/diff-patch.test.ts | 26 ++++++++++++++++++++++++++
+ 2 files changed, 40 insertions(+), 7 deletions(-)
+
+diff --git a/src/diff.ts b/src/diff.ts
+index f1167e7..9420148 100644
+--- a/src/diff.ts
++++ b/src/diff.ts
+@@ -248,6 +248,7 @@ export async function patchUpdateFromDiffToolResponse(
+   if (!toolResponse || typeof toolResponse !== "object") return undefined;
+   const response = toolResponse as DiffToolResponse;
+   if (typeof response.filePath !== "string") return undefined;
++  const filePath = resolveToolPath(response.filePath);
+   // An Edit with an empty old_string reports "" as the original of a created
+   // file and of an existing empty file. The response does not tell the two
+   // apart, so the caller keeps the standard diff.
+@@ -273,18 +274,18 @@ export async function patchUpdateFromDiffToolResponse(
+   // The same size limit as the new side: a larger text gets the standard diff.
+   if (oldText !== null && Buffer.byteLength(oldText, "utf8") > MAX_PATCH_FILE_BYTES)
+     return undefined;
+-  const newText = await readPatchSource(response.filePath);
++  const newText = await readPatchSource(filePath);
+   if (typeof newText !== "string" || newText.startsWith("\uFEFF")) return undefined;
+   if (response.type === "create" && newText !== response.content) return undefined;
+   const patch = filePatch(oldText, newText);
+   if (!patch) return undefined;
+   return {
+-    content: [patchContent(response.filePath, patch, form)],
++    content: [patchContent(filePath, patch, form)],
+     // A created file keeps the location of its Write tool call.
+     locations:
+       oldText === null
+-        ? [{ path: response.filePath }]
+-        : patch.hunks.map(({ newStart }) => ({ path: response.filePath!, line: newStart })),
++        ? [{ path: filePath }]
++        : patch.hunks.map(({ newStart }) => ({ path: filePath, line: newStart })),
+   };
+ }
+ 
+@@ -388,8 +389,8 @@ export async function v2UpdateFromDiffToolResponse(toolResponse: unknown): Promi
+   if (exact) return exact;
+   if (!toolResponse || typeof toolResponse !== "object") return {};
+   const response = toolResponse as DiffToolResponse;
+-  const filePath = response.filePath;
+-  if (typeof filePath !== "string") return {};
++  if (typeof response.filePath !== "string") return {};
++  const filePath = resolveToolPath(response.filePath);
+   if (response.type === "create") {
+     const hunk =
+       typeof response.content === "string" && isPatchableText(response.content)
+@@ -739,8 +740,14 @@ export function v2DiffContent(
+   return diff as unknown as ToolCallContent;
+ }
+ 
++/**
++ * The one spelling of a tool's file path. The preview of a change reads the
++ * path from the tool input and the result reads it from the tool response, and
++ * on Windows the two spell one file `D:\w\a.txt` and `D:/w/a.txt`; a client
++ * that keys a file row by its path then shows the file twice.
++ */
+ function resolveToolPath(filePath: string, cwd?: string): string {
+-  return path.isAbsolute(filePath) ? filePath : path.resolve(cwd ?? process.cwd(), filePath);
++  return path.resolve(cwd ?? process.cwd(), filePath);
+ }
+ 
+ function isMissingFileError(error: unknown): boolean {
+diff --git a/src/tests/diff-patch.test.ts b/src/tests/diff-patch.test.ts
+index af01e74..bda44dc 100644
+--- a/src/tests/diff-patch.test.ts
++++ b/src/tests/diff-patch.test.ts
+@@ -820,3 +820,29 @@ describe("PostToolUse hook patches", () => {
+     ).toEqual({});
+   });
+ });
++
++describe("the file path of a result diff", () => {
++  it("is spelled as the preview spells it, so a client keys one file once", async () => {
++    const directory = await mkdtemp(path.join(os.tmpdir(), "claude-acp-diff-path-"));
++    tempDirectories.push(directory);
++    const file = path.join(directory, "rows.txt");
++    await writeFile(file, "beta\n");
++    // The tool response can spell the path another way than the tool input (on
++    // Windows `D:/w/rows.txt` for `D:\w\rows.txt`); here: a `.` segment.
++    const spelled = `${directory}${path.sep}.${path.sep}rows.txt`;
++
++    const exact = await patchUpdateFromDiffToolResponse(
++      { filePath: spelled, type: "create", content: "beta\n" },
++      "v2",
++    );
++    const standard = await v2UpdateFromDiffToolResponse({
++      filePath: spelled,
++      type: "update",
++      originalFile: "alpha\n",
++      content: "beta\n",
++    });
++
++    expect(exact?.locations).toEqual([{ path: file }]);
++    expect(standard.locations?.every((location) => location.path === file)).toBe(true);
++  });
++});
+-- 
+2.43.0
+
