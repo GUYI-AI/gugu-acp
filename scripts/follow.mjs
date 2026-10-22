@@ -87,7 +87,7 @@ const PAIRING = bridgeFile().pairing !== false
 let latestCliMemo = null
 const latestCli = () => (latestCliMemo ??= lastLine(node('compat.mjs', ['latest-cli', bridgeName]).stdout))
 const compatHas = (version) => JSON.parse(readFileSync(join(ROOT, 'compat.json'), 'utf8'))
-  .bridges[bridgeName]?.releases.some((r) => r.version === version) ?? false
+  .bridges[bridgeFile().compatKey ?? bridgeName]?.releases.some((r) => r.version === version) ?? false
 
 function onNpm(spec) {
   try { return sh(`npm view "${spec}" version`, { stdio: ['ignore', 'pipe', 'ignore'] }).trim() !== '' } catch { return false }

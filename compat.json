@@ -97,6 +97,19 @@
           ]
         }
       ]
+    },
+    "claude-agent-acp-v2": {
+      "package": "@gugu-acp/claude-agent-acp",
+      "cli": "claude",
+      "releases": [
+        {
+          "version": "2.0.0",
+          "protocolVersion": 2,
+          "upstreamTag": "v0.94.0",
+          "cliFrom": "2.1.304",
+          "verified": []
+        }
+      ]
     }
   }
 }

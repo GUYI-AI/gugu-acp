@@ -39,7 +39,7 @@ function run(cmd, args, opts = {}) {
 
 // Upstream tests read provider settings from the environment (e.g. ANTHROPIC_BASE_URL); a build must
 // not depend on whatever the calling shell or CI job happens to export.
-const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_|ABC_)/.test(k)))
+const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(ANTHROPIC_|CLAUDE_|ABC_|SSH_)|^NO_BROWSER$/.test(k)))
 
 function sh(line, cwd) {
   execFileSync(line, { cwd, stdio: ['ignore', 'inherit', 'inherit'], shell: true, env: cleanEnv })
@@ -99,6 +99,7 @@ pkg.description = `Gugu build of ${upstreamName} ${upstreamVersion}: upstream so
 pkg.repository = { type: 'git', url: `git+${REPO_URL}.git`, directory: `bridges/${opts.bridge}` }
 pkg.gugu = {
   bridge: opts.bridge,
+  ...(bridge.protocolVersion ? { protocolVersion: bridge.protocolVersion } : {}),
   upstream: { repo: bridge.upstream.repo, package: upstreamName, version: upstreamVersion, tag, commit },
   patches,
 }

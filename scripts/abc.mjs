@@ -50,12 +50,20 @@ readline.createInterface({ input: child.stderr }).on('line', (l) => { stderrTail
 child.on('exit', (code, signal) => { if (!done) verdict('RIG-FAIL', { step: 'bridge-exited', code, signal, stderrTail }) })
 
 let id = 0; const pending = new Map()
+const foreground = new Map()
 const send = (obj) => child.stdin.write(JSON.stringify(obj) + '\n')
 const call = (method, params) => new Promise((res, rej) => { const i = ++id; pending.set(i, { res, rej }); send({ jsonrpc: '2.0', id: i, method, params }) })
 readline.createInterface({ input: child.stdout }).on('line', (line) => {
   let m; try { m = JSON.parse(line) } catch { return }
   if (m.id !== undefined && (m.result !== undefined || m.error !== undefined) && pending.has(m.id)) {
     const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(m.error) : p.res(m.result); return
+  }
+  if (m.method === 'session/update' && m.params.update.sessionUpdate === 'state_update') {
+    const work = foreground.get(m.params.sessionId)
+    const update = m.params.update
+    if (work && update.state !== 'idle') work.running = true
+    if (work?.running && update.state === 'idle') { foreground.delete(m.params.sessionId); work.resolve(update) }
+    return
   }
   if (m.method === 'session/request_permission') {
     const opt = m.params.options.find((o) => o.kind?.startsWith('allow')) ?? m.params.options[0]
@@ -66,14 +74,19 @@ readline.createInterface({ input: child.stdout }).on('line', (line) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const TIMEOUT = Symbol('timeout')
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => TIMEOUT)])
-const prompt = (sid, text) => call('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text }] })
+const prompt = async (sid, text) => {
+  const idle = new Promise((resolve) => foreground.set(sid, { running: false, resolve }))
+  const receipt = await call('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text }] })
+  if (typeof receipt.messageId !== 'string') throw new Error('ACP v2 prompt was not admitted')
+  return idle
+}
 const ended = (r) => r !== TIMEOUT && r?.stopReason === 'end_turn'
 
 let sid
 try {
-  await call('initialize', { protocolVersion: 1, clientCapabilities: {} })
+  await call('initialize', { protocolVersion: 2, info: { name: 'gugu-abc', version: '2' }, capabilities: { _meta: { asyncTasks: true } } })
   sid = (await call('session/new', { cwd: WORK, mcpServers: [] })).sessionId
-  try { await call('session/set_mode', { sessionId: sid, modeId: 'bypassPermissions' }) } catch {}
+  try { await call('session/set_config_option', { sessionId: sid, configId: 'mode', type: 'id', value: 'bypassPermissions' }) } catch {}
 } catch (e) { verdict('RIG-FAIL', { step: 'session', error: e, stderrTail }) }
 log('session', sid, cliVersion)
 

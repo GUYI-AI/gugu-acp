@@ -20,7 +20,9 @@ const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const FILE = join(ROOT, 'compat.json')
 const [cmd, bridgeName, ...rest] = process.argv.slice(2)
 const compat = JSON.parse(readFileSync(FILE, 'utf8'))
-const entry = compat.bridges[bridgeName]
+const bridge = JSON.parse(readFileSync(join(ROOT, 'bridges', bridgeName, 'bridge.json'), 'utf8'))
+if (bridge.protocolVersion === 2 && !bridge.compatKey) throw new Error('ACP v2 requires a separate compatKey')
+const entry = compat.bridges[bridge.compatKey ?? bridgeName]
 if (!entry) { console.error(`FAIL: no bridge ${bridgeName} in compat.json`); process.exit(2) }
 const today = new Date().toISOString().slice(0, 10)
 const save = () => writeFileSync(FILE, `${JSON.stringify(compat, null, 2)}\n`)
@@ -28,7 +30,6 @@ const save = () => writeFileSync(FILE, `${JSON.stringify(compat, null, 2)}\n`)
 if (cmd === 'newest') {
   console.log(JSON.stringify(entry.releases.at(-1)))
 } else if (cmd === 'latest-cli') {
-  const bridge = JSON.parse(readFileSync(join(ROOT, 'bridges', bridgeName, 'bridge.json'), 'utf8'))
   console.log(execFileSync(`npm view "${bridge.cli.npm}" version`, { shell: true, encoding: 'utf8' }).trim())
 } else if (cmd === 'record-verified') {
   const [version, cli, how] = rest
@@ -42,7 +43,7 @@ if (cmd === 'newest') {
 } else if (cmd === 'add-release') {
   const [version, upstreamTag, cli, how] = rest
   if (entry.releases.some((r) => r.version === version)) { console.error(`FAIL: release ${version} exists`); process.exit(2) }
-  entry.releases.push({ version, upstreamTag, cliFrom: cli, verified: [{ cli, at: today, how }] })
+  entry.releases.push({ version, upstreamTag, cliFrom: cli, ...(bridge.protocolVersion ? { protocolVersion: bridge.protocolVersion } : {}), verified: [{ cli, at: today, how }] })
   save()
   console.log(JSON.stringify(entry.releases.at(-1)))
 } else {

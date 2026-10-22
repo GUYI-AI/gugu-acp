@@ -1,11 +1,11 @@
 {
   "package": "@gugu-acp/claude-agent-acp",
-  "version": "1.4.1",
+  "version": "2.0.0",
   "upstream": {
     "repo": "https://github.com/agentclientprotocol/claude-agent-acp",
     "package": "@agentclientprotocol/claude-agent-acp",
-    "tag": "v0.89.1",
-    "commit": "4e1fc1e8df2b9af3b1b2d6880ba90c5862283ba8"
+    "tag": "v0.94.0",
+    "commit": "7bcbfc7a5ca7ab9c7eece4f0749ccaf49c7ba7e1"
   },
   "cli": {
     "name": "claude",
@@ -16,6 +16,8 @@
     "npm run build"
   ],
   "test": [
-    "npx vitest run"
-  ]
+    "npx vitest run --maxWorkers=4"
+  ],
+  "protocolVersion": 2,
+  "compatKey": "claude-agent-acp-v2"
 }
