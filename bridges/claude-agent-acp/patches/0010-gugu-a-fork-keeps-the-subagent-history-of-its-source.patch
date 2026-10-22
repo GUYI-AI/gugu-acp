@@ -1,0 +1,158 @@
+From 1a1d96f1e3037746de3b18c3133320e042b7cfde Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <shuxue@protonmail.com>
+Date: Thu, 22 Oct 2026 10:04:11 -0700
+Subject: [PATCH] gugu: a fork keeps the subagent history of its source
+
+The SDK fork copies only the session transcript, not the
+<session>/subagents folder beside it. On ACP v2 the replay of a session
+finds a native subagent by that folder's metadata, so a fork of a session
+whose parent had launched a background subagent replayed the launch as
+"Some subagent history is not available" and never ended it. The fork keeps
+the source's tool use ids, so copying the folder lets the replay announce
+the subagent and its end, as a load of the source does.
+---
+ src/fork-session.ts                |  3 ++
+ src/subagent-history.ts            | 26 +++++++++++++++-
+ src/tests/subagent-history.test.ts | 50 ++++++++++++++++++++++++++++--
+ 3 files changed, 76 insertions(+), 3 deletions(-)
+
+diff --git a/src/fork-session.ts b/src/fork-session.ts
+index af0ae53..8c388fc 100644
+--- a/src/fork-session.ts
++++ b/src/fork-session.ts
+@@ -13,6 +13,7 @@ import {
+ import { createHash } from "node:crypto";
+ import { assistantMessageText } from "./session-failure-extension.js";
+ import { SessionTiming } from "./session-timing.js";
++import { copySubagentHistory } from "./subagent-history.js";
+ 
+ type ForkSessionMeta = {
+   [key: string]: unknown;
+@@ -188,6 +189,7 @@ export async function forkSession(
+   if (!point) {
+     const forked = await forkClaudeSession(params.sessionId, { dir: params.cwd });
+     timing.phase("sdk-fork", " resolution=latest");
++    await copySubagentHistory(params.sessionId, forked.sessionId);
+     return { sessionId: forked.sessionId };
+   }
+ 
+@@ -235,5 +237,6 @@ export async function forkSession(
+     upToMessageId: messageUuid ?? fullHistoryUuid,
+   });
+   timing.phase("sdk-fork");
++  await copySubagentHistory(params.sessionId, forked.sessionId);
+   return { sessionId: forked.sessionId };
+ }
+diff --git a/src/subagent-history.ts b/src/subagent-history.ts
+index 26fc00f..05c4bd2 100644
+--- a/src/subagent-history.ts
++++ b/src/subagent-history.ts
+@@ -4,7 +4,7 @@ import {
+   type SessionMessage,
+ } from "@anthropic-ai/claude-agent-sdk";
+ import { createReadStream } from "node:fs";
+-import { readdir, readFile } from "node:fs/promises";
++import { cp, readdir, readFile } from "node:fs/promises";
+ import path from "node:path";
+ import readline from "node:readline";
+ import { isNativeSubagentControlTool, type HistoricalSubagent } from "./native-subagents.js";
+@@ -87,6 +87,30 @@ export async function subagentHistory(sessionId: string): Promise<SubagentHistor
+   return dir ? { agents, dir } : { agents };
+ }
+ 
++/**
++ * Gives the fork `forkId` of the session `sessionId` the subagent transcripts and
++ * metadata of its source. The SDK fork copies only the session transcript, and
++ * the fork keeps the source's tool use ids, so with these files a load of the
++ * fork finds the subagent each Agent call launched, as a load of the source does.
++ * A launch after the fork point is not in the fork, so its files go unread.
++ */
++export async function copySubagentHistory(sessionId: string, forkId: string): Promise<void> {
++  const source = await findTranscript(sessionId);
++  const fork = await findTranscript(forkId);
++  if (!source || !fork) return;
++  const from = subagentsDirectory(source, sessionId);
++  try {
++    await readdir(from);
++  } catch {
++    return; // The source launched no subagent.
++  }
++  await cp(from, subagentsDirectory(fork, forkId), {
++    recursive: true,
++    errorOnExist: true,
++    force: false,
++  });
++}
++
+ /** The folder of the subagent transcripts, next to the session transcript `transcript`. */
+ function subagentsDirectory(transcript: string, sessionId: string): string {
+   return path.join(path.dirname(transcript), sessionId, "subagents");
+diff --git a/src/tests/subagent-history.test.ts b/src/tests/subagent-history.test.ts
+index 3c7652f..b5690f1 100644
+--- a/src/tests/subagent-history.test.ts
++++ b/src/tests/subagent-history.test.ts
+@@ -1,9 +1,9 @@
+-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
++import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import { afterEach, beforeEach, describe, expect, it } from "vitest";
+ import type { SessionMessage } from "@anthropic-ai/claude-agent-sdk";
+-import { stripForkPrefix, subagentLineage } from "../subagent-history.js";
++import { copySubagentHistory, stripForkPrefix, subagentLineage } from "../subagent-history.js";
+ 
+ const sessionId = "33333333-3333-4333-8333-333333333333";
+ const base = {
+@@ -315,3 +315,49 @@ describe("stripForkPrefix", () => {
+     expect(stripForkPrefix(messages)).toBe(messages);
+   });
+ });
++
++describe("copySubagentHistory", () => {
++  const forkId = "44444444-4444-4444-8444-444444444444";
++  let configDir: string;
++  let originalConfigDir: string | undefined;
++  beforeEach(async () => {
++    configDir = await mkdtemp(path.join(os.tmpdir(), "claude-acp-fork-history-"));
++    originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
++    process.env.CLAUDE_CONFIG_DIR = configDir;
++  });
++  afterEach(async () => {
++    if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
++    else process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
++    await rm(configDir, { recursive: true, force: true });
++  });
++  const project = () => path.join(configDir, "projects", "-tmp-proj");
++
++  it("gives a fork the subagent transcripts and metadata of its source", async () => {
++    await mkdir(path.join(project(), sessionId, "subagents"), { recursive: true });
++    await writeFile(path.join(project(), `${sessionId}.jsonl`), "{}\n");
++    await writeFile(path.join(project(), `${forkId}.jsonl`), "{}\n");
++    await writeFile(path.join(project(), sessionId, "subagents", "agent-a1.jsonl"), "{}\n");
++    await writeFile(
++      path.join(project(), sessionId, "subagents", "agent-a1.meta.json"),
++      JSON.stringify(meta("toolu_launch", "worker")),
++    );
++
++    await copySubagentHistory(sessionId, forkId);
++
++    const copied = path.join(project(), forkId, "subagents");
++    expect((await readdir(copied)).sort()).toEqual(["agent-a1.jsonl", "agent-a1.meta.json"]);
++    expect(
++      JSON.parse(await readFile(path.join(copied, "agent-a1.meta.json"), "utf8")).toolUseId,
++    ).toBe("toolu_launch");
++  });
++
++  it("leaves a fork alone when its source launched no subagent", async () => {
++    await mkdir(project(), { recursive: true });
++    await writeFile(path.join(project(), `${sessionId}.jsonl`), "{}\n");
++    await writeFile(path.join(project(), `${forkId}.jsonl`), "{}\n");
++
++    await copySubagentHistory(sessionId, forkId);
++
++    expect(await readdir(project())).not.toContain(forkId);
++  });
++});
+-- 
+2.43.0
+
