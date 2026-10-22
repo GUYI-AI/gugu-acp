@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
-Date: Wed, 30 Sep 2026 16:04:20 +0800
-Subject: [PATCH] gugu: a login that names no identity is not "logged out"
+Date: Wed, 21 Oct 2026 20:02:29 -0700
+Subject: [PATCH 05/10] gugu: a login that names no identity is not "logged
+ out"
 
 Why: `claude auth status --json` for a bearer token, `ANTHROPIC_AUTH_TOKEN`
 (with a custom `ANTHROPIC_BASE_URL` or without, in the environment or in the
@@ -29,12 +30,12 @@ key source to `none`.
  3 files changed, 29 insertions(+), 5 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index df43692..dcfce5d 100644
+index fa46756..4e07d20 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -3166,7 +3166,7 @@ export class ClaudeAcpAgent {
+@@ -3424,7 +3424,7 @@ export class ClaudeAcpAgent {
+       }
      }
-     const status = fromCliStatus(stdout);
      if (!status) {
 -      this.logger.error("claude auth status returned unparseable output");
 +      this.logger.error("claude auth status named no identity");
@@ -42,10 +43,10 @@ index df43692..dcfce5d 100644
      }
      if (epoch !== this.authEpoch) {
 diff --git a/src/auth-status.ts b/src/auth-status.ts
-index 3922db0..1021e0d 100644
+index 7ce775a..b8842f8 100644
 --- a/src/auth-status.ts
 +++ b/src/auth-status.ts
-@@ -176,8 +176,9 @@ export function fromAccountInfo(account: AccountInfo | undefined): AuthStatus |
+@@ -187,8 +187,9 @@ export function fromAccountInfo(
  }
  
  /** Pre-session mapping from `claude auth status --json` stdout. Returns
@@ -54,19 +55,19 @@ index 3922db0..1021e0d 100644
 + *  `undefined` when the output is not the expected JSON object, or when it
 + *  reports a login without naming an identity, so callers can report "not
 + *  known" instead of guessing. */
- export function fromCliStatus(stdout: string): AuthStatus | undefined {
+ export function fromCliStatus(stdout: string, apiKeyHelper?: string): AuthStatus | undefined {
    let parsed: unknown;
    try {
-@@ -224,7 +225,7 @@ function mapAuthFields(fields: {
-   apiKeySource?: string;
+@@ -237,7 +238,7 @@ function mapAuthFields(fields: {
    email?: string;
    organization?: string;
+   apiKeyHelper?: string;
 -}): AuthStatus {
 +}): AuthStatus | undefined {
    const { apiProvider, subscriptionType, apiKeySource, email, organization } = fields;
  
    if (apiProvider === "gateway") {
-@@ -256,7 +257,11 @@ function mapAuthFields(fields: {
+@@ -277,7 +278,11 @@ function mapAuthFields(fields: {
        account,
      };
    }
@@ -80,10 +81,10 @@ index 3922db0..1021e0d 100644
  
  /** Names the plan with exactly one "Claude". A newer CLI already reports
 diff --git a/src/tests/auth-status.test.ts b/src/tests/auth-status.test.ts
-index c13ff69..edcc200 100644
+index 2265a21..aa9758f 100644
 --- a/src/tests/auth-status.test.ts
 +++ b/src/tests/auth-status.test.ts
-@@ -80,6 +80,14 @@ const CLI_BEDROCK = JSON.stringify({
+@@ -83,6 +83,14 @@ const CLI_BEDROCK = JSON.stringify({
    authMethod: "none",
    apiProvider: "bedrock",
  });
@@ -98,7 +99,7 @@ index c13ff69..edcc200 100644
  
  const MOCK_MODELS = [
    { value: "id", displayName: "name", description: "description", supportsAutoMode: true },
-@@ -258,6 +266,10 @@ describe("auth status mappers", () => {
+@@ -307,6 +315,10 @@ describe("auth status mappers", () => {
      expect(fromCliStatus(CLI_BEDROCK)).toEqual({ kind: "external", label: "AWS Bedrock" });
    });
  
@@ -109,7 +110,7 @@ index c13ff69..edcc200 100644
    it("reports unparseable CLI output as not known", () => {
      expect(fromCliStatus("")).toBeUndefined();
      expect(fromCliStatus("Usage: claude auth status")).toBeUndefined();
-@@ -443,6 +455,13 @@ describe("auth status over ACP", () => {
+@@ -594,6 +606,13 @@ describe("auth status over ACP", () => {
      expect(agent.currentAuthStatus).toBeUndefined();
    });
  

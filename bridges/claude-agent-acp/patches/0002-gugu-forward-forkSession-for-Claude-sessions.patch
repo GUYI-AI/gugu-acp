@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Wed, 9 Sep 2026 01:50:37 +0800
-Subject: [PATCH] gugu: forward forkSession for Claude sessions
+Subject: [PATCH 02/10] gugu: forward forkSession for Claude sessions
 
 Why: newSession() receives `_meta.claudeCode.options.forkSession` but drops
 it, so Gugu's runtime fork (resume + fork, nothing written to disk) silently
@@ -31,13 +31,13 @@ rebased on.
  3 files changed, 55 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 6cef0f9..faf8ae5 100644
+index 06a3355..d38f94e 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -2821,9 +2821,10 @@ export class ClaudeAcpAgent {
+@@ -3010,9 +3010,10 @@ export class ClaudeAcpAgent {
  
    async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
-     if (this.providerUpdate) await this.providerUpdate;
+     while (this.providerUpdate) await this.providerUpdate;
 +    const options = (params._meta as NewSessionMeta | undefined)?.claudeCode?.options;
      const response = await this.createSession(params, {
 -      // Revisit these meta values once we support resume
@@ -48,10 +48,10 @@ index 6cef0f9..faf8ae5 100644
      this.afterSetupResponse(response.sessionId, params.mcpServers);
      return response;
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 1307164..51e0a61 100644
+index 3b10026..0c87fb0 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -351,6 +351,42 @@ describe("task plan lifecycle", () => {
+@@ -387,6 +387,42 @@ describe("task plan lifecycle", () => {
    });
  });
  
@@ -95,7 +95,7 @@ index 1307164..51e0a61 100644
    let child: ReturnType<typeof spawn>;
  
 diff --git a/src/tests/create-session-options.test.ts b/src/tests/create-session-options.test.ts
-index 435d5b6..fbfb1e6 100644
+index 6c157c7..dd2f08a 100644
 --- a/src/tests/create-session-options.test.ts
 +++ b/src/tests/create-session-options.test.ts
 @@ -120,6 +120,22 @@ describe("createSession options merging", () => {

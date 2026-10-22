@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 19:26:55 +0800
-Subject: [PATCH] Preserve streamed text on a repeated start of the same message
+Subject: [PATCH 06/10] Preserve streamed text on a repeated start of the same
+ message
 
 Why: Claude Code 2.1.304 with a gateway can emit another message_start for
 an already-streamed API message before its consolidated assistant message.
@@ -13,12 +14,16 @@ Upstream: none yet; reproduced in the source-level regression test from a
 real SDK event sequence during Gugu issue #7582 acceptance.
 Drop: when upstream preserves the delivered prefix across repeated starts
 of the same API message and includes equivalent regression coverage.
+---
+ src/acp-agent.ts            | 22 ++++++++++++++++++++--
+ src/tests/acp-agent.test.ts | 19 +++++++++++++++++++
+ 2 files changed, 39 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 626beea..df62fbe 100644
+index 4e07d20..047c291 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -4011,6 +4011,7 @@ export class ClaudeAcpAgent {
+@@ -4463,6 +4463,7 @@ export class ClaudeAcpAgent {
      // subagent message gets the same remainder diff as a top-level message.
      // The entry of a subagent goes when the subagent finishes.
      const streamedBlocksByParent = new Map<string, StreamedBlock[]>();
@@ -26,31 +31,28 @@ index 626beea..df62fbe 100644
      const streamedBlocksOf = (parentToolUseId: string | null): StreamedBlock[] => {
        const key = parentToolUseId ?? "";
        let blocks = streamedBlocksByParent.get(key);
-@@ -5754,6 +5755,7 @@ export class ClaudeAcpAgent {
-                   subagents.discardPending(message.tool_use_id);
+@@ -6542,6 +6543,7 @@ export class ClaudeAcpAgent {
                    // The subagent streams no more text under this parent.
                    streamedBlocksByParent.delete(message.tool_use_id);
+                   droppedStreams.delete(message.tool_use_id);
 +                  streamMessageIdsByParent.delete(message.tool_use_id);
                  }
-                 settleLiveTask(message.task_id);
-                 break;
-@@ -5779,7 +5781,10 @@ export class ClaudeAcpAgent {
-                   const parentToolUseId = session.liveBackgroundTasks.get(
-                     message.task_id,
-                   )?.parentToolUseId;
--                  if (parentToolUseId) streamedBlocksByParent.delete(parentToolUseId);
-+                  if (parentToolUseId) {
-+                    streamedBlocksByParent.delete(parentToolUseId);
+                 await endBackgroundTerminal(message.task_id);
+                 if (message.status === "stopped") {
+@@ -6587,6 +6589,7 @@ export class ClaudeAcpAgent {
+                   if (parentToolUseId) {
+                     streamedBlocksByParent.delete(parentToolUseId);
+                     droppedStreams.delete(parentToolUseId);
 +                    streamMessageIdsByParent.delete(parentToolUseId);
-+                  }
-                   settleLiveTask(message.task_id);
-                 } else if (
-                   message.patch.status === "running" ||
-@@ -6698,7 +6703,22 @@ export class ClaudeAcpAgent {
-               // the top-level record. Fires once, before any of this message's
-               // blocks, so it doesn't disturb the mid-message turn-activation
-               // path the way resetting on turn activation would.
+                   }
+                   await endBackgroundTerminal(message.task_id);
+                   if (message.patch.status === "killed") {
+@@ -7568,8 +7571,23 @@ export class ClaudeAcpAgent {
+               // doesn't disturb the mid-message turn-activation path the way
+               // resetting on turn activation would. The record's drop latch
+               // (see below) resets with it.
 -              streamedBlocksOf(message.parent_tool_use_id).length = 0;
+-              droppedStreams.delete(message.parent_tool_use_id ?? "");
 +              // Some CLI/gateway pairs repeat message_start for the same API
 +              // message between its live stream and its assembled assistant
 +              // message. That is still the same content: retain the prefix
@@ -61,6 +63,7 @@ index 626beea..df62fbe 100644
 +                streamMessageIdsByParent.get(streamKey) !== currentStreamMessageId
 +              ) {
 +                streamedBlocksOf(message.parent_tool_use_id).length = 0;
++                droppedStreams.delete(streamKey);
 +              }
 +              if (currentStreamMessageId) {
 +                streamMessageIdsByParent.set(streamKey, currentStreamMessageId);
@@ -68,13 +71,13 @@ index 626beea..df62fbe 100644
 +                streamMessageIdsByParent.delete(streamKey);
 +              }
              }
-             // Accumulate the text/thinking actually streamed live, so the
-             // `assistant` case below can diff its assembled blocks against what
+             if (
+               message.parent_tool_use_id === null &&
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index ae3f2ea..6b8d0af 100644
+index e825d9b..b13e57f 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -12975,6 +12975,25 @@ describe("assembled assistant text fallback", () => {
+@@ -15722,6 +15722,25 @@ describe("assembled assistant text fallback", () => {
      expect(messageChunkTexts(updates)).toEqual(["hello ", "world"]);
    });
  

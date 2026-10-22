@@ -1,8 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Thu, 1 Oct 2026 04:52:59 +0800
-Subject: [PATCH] gugu: mark a usage_update whose context window is still a
- guess
+Subject: [PATCH 04/10] gugu: mark a usage_update whose context window is still
+ a guess
 
 Why: a session's `size` is the name-based guess until the window is
 authoritative, i.e. confirmed by the cross-session cache, a result's
@@ -28,10 +28,10 @@ Drop when: upstream reports on usage_update whether `size` is confirmed.
  2 files changed, 97 insertions(+), 4 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 023c812..df43692 100644
+index 84f2bcb..fa46756 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -4219,7 +4219,10 @@ export class ClaudeAcpAgent {
+@@ -4720,7 +4720,10 @@ export class ClaudeAcpAgent {
      };
  
      // ACP's usage_update has no model field, so the model the usage belongs
@@ -43,7 +43,7 @@ index 023c812..df43692 100644
      const attachUsageModel = <
        T extends {
          sessionUpdate: "usage_update";
-@@ -4230,12 +4233,14 @@ export class ClaudeAcpAgent {
+@@ -4731,12 +4734,14 @@ export class ClaudeAcpAgent {
      >(
        update: T,
      ): T => {
@@ -61,10 +61,10 @@ index 023c812..df43692 100644
        };
      };
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 51e0a61..85ba9b4 100644
+index 0c87fb0..e825d9b 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -11497,6 +11497,89 @@ describe("usage_update computation", () => {
+@@ -14244,6 +14244,89 @@ describe("usage_update computation", () => {
      expect(usageUpdates[1].update.cost).toBeDefined();
    });
  
@@ -154,7 +154,7 @@ index 51e0a61..85ba9b4 100644
    it("includes the effective model id on usage_update notifications", async () => {
      const { agent, updates } = createMockAgentWithCapture();
      injectSession(agent, [
-@@ -14943,9 +15026,11 @@ describe("result origin handling", () => {
+@@ -17690,9 +17773,11 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();
@@ -166,7 +166,7 @@ index 51e0a61..85ba9b4 100644
      });
    });
  
-@@ -14961,7 +15046,10 @@ describe("result origin handling", () => {
+@@ -17708,7 +17793,10 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();

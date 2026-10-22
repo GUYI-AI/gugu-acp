@@ -1,11 +1,13 @@
 #!/usr/bin/env node
-// The ABC check: drive one bridge process with a bare ACP client against a REAL CLI, the way Gugu
-// uses it, and require every turn to end.
+// The ABC check: drive one bridge process with a bare ACP v2 client against a REAL CLI, the way Gugu
+// uses it, and require every turn to end. On v2 the prompt is answered once Claude Code takes it in;
+// the turn ends with the session's `state_update` `idle`.
 //
 //   node scripts/abc.mjs --adapter <bridge>/dist/index.js [--cli <claude binary>] [--work <dir>]
 //
 //   A  plain prompt                                  -> must end
-//   B  launch one background subagent               -> must end (with the 0.75.1 bridge this left one unpaid idle)
+//   B  launch one background subagent               -> must end before the subagent does (v1 held the answer
+//                                                       until it finished; with the 0.75.1 bridge it left one unpaid idle)
 //   C  prompt + mid-turn _session/steering, delivery "next" (how Gugu injects group messages)
 //                                                    -> must end; the #6394 bug shows as a timeout here
 //
@@ -43,19 +45,26 @@ let child
 const verdict = (v, extra = {}) => { done = true; try { child?.kill() } catch {} console.log(JSON.stringify({ verdict: v, cli: CLI, cliVersion, adapter: args.adapter, results, ...extra })); process.exit(v === 'PASS' ? 0 : v === 'FAIL' ? 1 : 2) }
 
 child = spawn(process.execPath, [args.adapter], {
-  cwd: WORK, env: { ...process.env, ...modelEnv(), CLAUDE_CODE_EXECUTABLE: CLI, DISABLE_AUTOUPDATER: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+  cwd: WORK,
+  env: { ...process.env, ...modelEnv(), CLAUDE_CODE_EXECUTABLE: CLI, DISABLE_AUTOUPDATER: '1', CLAUDE_AGENT_ACP_PROTOCOL: 'v2' },
+  stdio: ['pipe', 'pipe', 'pipe'],
 })
 let stderrTail = []
 readline.createInterface({ input: child.stderr }).on('line', (l) => { stderrTail = [...stderrTail.slice(-19), l] })
 child.on('exit', (code, signal) => { if (!done) verdict('RIG-FAIL', { step: 'bridge-exited', code, signal, stderrTail }) })
 
 let id = 0; const pending = new Map()
+const idleWaiters = new Map()
+const nextIdle = (sid) => new Promise((res) => idleWaiters.set(sid, res))
 const send = (obj) => child.stdin.write(JSON.stringify(obj) + '\n')
 const call = (method, params) => new Promise((res, rej) => { const i = ++id; pending.set(i, { res, rej }); send({ jsonrpc: '2.0', id: i, method, params }) })
 readline.createInterface({ input: child.stdout }).on('line', (line) => {
   let m; try { m = JSON.parse(line) } catch { return }
   if (m.id !== undefined && (m.result !== undefined || m.error !== undefined) && pending.has(m.id)) {
     const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(m.error) : p.res(m.result); return
+  }
+  if (m.method === 'session/update' && m.params.update.sessionUpdate === 'state_update' && m.params.update.state === 'idle') {
+    idleWaiters.get(m.params.sessionId)?.(m.params.update); idleWaiters.delete(m.params.sessionId); return
   }
   if (m.method === 'session/request_permission') {
     const opt = m.params.options.find((o) => o.kind?.startsWith('allow')) ?? m.params.options[0]
@@ -66,14 +75,19 @@ readline.createInterface({ input: child.stdout }).on('line', (line) => {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const TIMEOUT = Symbol('timeout')
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => TIMEOUT)])
-const prompt = (sid, text) => call('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text }] })
+/** A prompt's turn: answered when Claude Code takes the prompt in, ended at the session's next idle. */
+const prompt = async (sid, text) => {
+  const idle = nextIdle(sid)
+  await call('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text }] })
+  return idle
+}
 const ended = (r) => r !== TIMEOUT && r?.stopReason === 'end_turn'
 
 let sid
 try {
-  await call('initialize', { protocolVersion: 1, clientCapabilities: {} })
-  sid = (await call('session/new', { cwd: WORK, mcpServers: [] })).sessionId
-  try { await call('session/set_mode', { sessionId: sid, modeId: 'bypassPermissions' }) } catch {}
+  await call('initialize', { protocolVersion: 2, info: { name: 'gugu-abc', version: '1' }, capabilities: {} })
+  sid = (await call('session/new', { cwd: WORK })).sessionId
+  try { await call('session/set_config_option', { sessionId: sid, configId: 'mode', value: 'bypassPermissions' }) } catch {}
 } catch (e) { verdict('RIG-FAIL', { step: 'session', error: e, stderrTail }) }
 log('session', sid, cliVersion)
 
@@ -83,9 +97,12 @@ try {
   if (!ended(a)) verdict('FAIL', { step: 'A' })
   await sleep(4000)
 
+  const bStart = Date.now()
   const b = await withTimeout(prompt(sid, 'Launch exactly ONE background subagent with the Agent tool (subagent_type general-purpose, run_in_background true). Its task: run the Bash command `sleep 15` and then reply with the single word done. After launching it, reply with just the word launched and end your turn without waiting.'), 180_000)
-  results.B = b === TIMEOUT ? 'timeout' : b.stopReason; log('B', results.B)
+  results.B = b === TIMEOUT ? 'timeout' : b.stopReason; results.Bms = Date.now() - bStart; log('B', results.B, results.Bms)
   if (!ended(b)) verdict('FAIL', { step: 'B' })
+  // The subagent sleeps 15 s; a turn held for it ends after it.
+  if (results.Bms >= 15_000) verdict('FAIL', { step: 'B/held-for-subagent' })
   await sleep(45_000) // the subagent finishes and its follow-up cycle runs
 
   const c0 = prompt(sid, 'Run the Bash command `sleep 20`, then reply with just: ok')

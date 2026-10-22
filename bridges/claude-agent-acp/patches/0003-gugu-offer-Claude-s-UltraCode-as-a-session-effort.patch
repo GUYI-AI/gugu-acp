@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 24 Sep 2026 15:34:32 +0800
-Subject: [PATCH] gugu: offer Claude's UltraCode as a session effort
+Subject: [PATCH 03/10] gugu: offer Claude's UltraCode as a session effort
 
 Why: UltraCode (xhigh effort plus standing dynamic-workflow orchestration) is
 a session flag in Claude Code (`ultracode` in flag settings), not an
@@ -11,7 +11,6 @@ row of the effort picker on models that support `xhigh`: picking it applies
 `ultracode: false` in the same update; a model switch to a model without
 `xhigh` clears it. Sessions that never touch UltraCode keep the plain
 `effortLevel` update, so other clients see no change.
-
 
 Rebased onto v0.89.0, which brought its own `effortFlagSettings(value,
 settings)`: since CLI 2.1.284 an `effortLevel` change sent without an
@@ -34,10 +33,10 @@ extension point Gugu can use without patching).
  create mode 100644 src/tests/ultracode-effort.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index faf8ae5..023c812 100644
+index d38f94e..84f2bcb 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -311,6 +311,7 @@ import {
+@@ -354,6 +354,7 @@ import {
    effortFlagSettings,
    mergeEffortSettings,
    settingsEffortForModel,
@@ -45,7 +44,7 @@ index faf8ae5..023c812 100644
  } from "./session-effort.js";
  
  export { EFFORT_CONFIG_ID, settingsEffortForModel } from "./session-effort.js";
-@@ -9047,9 +9048,7 @@ export class ClaudeAcpAgent {
+@@ -10630,9 +10631,7 @@ export class ClaudeAcpAgent {
            ? currentEffort
            : pinnedEffort);
        const effortPinnedForNewModel =
@@ -56,7 +55,7 @@ index faf8ae5..023c812 100644
        const seedEffort = effortPinnedForNewModel
          ? pinnedEffort
          : settingsEffortForModel(
-@@ -9097,14 +9096,15 @@ export class ClaudeAcpAgent {
+@@ -10680,14 +10679,15 @@ export class ClaudeAcpAgent {
          const newEffort =
            typeof newEffortOpt?.currentValue === "string" ? newEffortOpt.currentValue : undefined;
          try {
@@ -77,7 +76,7 @@ index faf8ae5..023c812 100644
                mergeEffortSettings(
                  session.settingsManager.getSettings(),
                  session.effortSettingsOverride,
-@@ -9177,9 +9177,13 @@ export class ClaudeAcpAgent {
+@@ -10760,9 +10760,13 @@ export class ClaudeAcpAgent {
      } else if (configId === EFFORT_CONFIG_ID) {
        // Apply first so a rejected control request cannot leave the displayed
        // value ahead of the SDK flag layer.
@@ -91,7 +90,7 @@ index faf8ae5..023c812 100644
            mergeEffortSettings(
              session.settingsManager.getSettings(),
              session.effortSettingsOverride,
-@@ -10043,7 +10047,9 @@ export class ClaudeAcpAgent {
+@@ -11676,7 +11680,9 @@ export class ClaudeAcpAgent {
        );
        const initialEffort = configOptions.find((option) => option.id === EFFORT_CONFIG_ID);
        if (useRecommendedValue && typeof initialEffort?.currentValue === "string") {
@@ -103,7 +102,7 @@ index faf8ae5..023c812 100644
        // Seed the context window without awaited IPC. The cached authoritative
        // window from a prior turn wins (`result.modelUsage`, cross-session),
 diff --git a/src/session-effort.ts b/src/session-effort.ts
-index 122f104..3a53d1a 100644
+index cf9857f..69cbcd9 100644
 --- a/src/session-effort.ts
 +++ b/src/session-effort.ts
 @@ -12,18 +12,37 @@ export function toSdkEffortLevel(value: string | undefined): EffortLevel | null
@@ -188,10 +187,10 @@ index 122f104..3a53d1a 100644
      currentEffortLevel && includes(currentEffortLevel)
        ? currentEffortLevel
 diff --git a/src/tests/model-resolution.test.ts b/src/tests/model-resolution.test.ts
-index f908960..9f32ced 100644
+index a1883b2..17f0b3c 100644
 --- a/src/tests/model-resolution.test.ts
 +++ b/src/tests/model-resolution.test.ts
-@@ -372,15 +372,17 @@ describe("settingsEffortForModel", () => {
+@@ -380,15 +380,17 @@ describe("settingsEffortForModel", () => {
  
  describe("effortFlagSettings", () => {
    it("carries ultracode only when settings request it", () => {
@@ -214,7 +213,7 @@ index f908960..9f32ced 100644
    });
  });
 diff --git a/src/tests/session-config-options.test.ts b/src/tests/session-config-options.test.ts
-index 07a29c3..d969288 100644
+index b404ecc..2231957 100644
 --- a/src/tests/session-config-options.test.ts
 +++ b/src/tests/session-config-options.test.ts
 @@ -554,6 +554,20 @@ describe("session config options", () => {

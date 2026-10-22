@@ -31,10 +31,10 @@ Each patch's commit message states three things: **Why** it is needed, the **Ups
 `compat.json` is our declaration, not upstream's. Upstream's `claudeCodeVersion` (the CLI version an SDK was cut with) is only a starting point. A CLI version enters a release's `verified` list only after our **ABC** check passed:
 
 - **A** a plain turn ends;
-- **B** a turn that launches a background subagent ends;
+- **B** a turn that launches a background subagent ends, before the subagent does;
 - **C** a turn that receives a mid-turn `_session/steering` message with `delivery: "next"` (how Gugu injects group messages) ends.
 
-`scripts/abc.mjs` drives the bridge with a bare ACP client against a real CLI. Per bridge, releases are ordered by `cliFrom`; a release serves `[cliFrom, next release's cliFrom)` and the newest one is open-ended.
+`scripts/abc.mjs` drives the bridge with a bare ACP v2 client (as Gugu does since 1.5.0) against a real CLI. Per bridge, releases are ordered by `cliFrom`; a release serves `[cliFrom, next release's cliFrom)` and the newest one is open-ended.
 
 ## Automation (`follow` workflow, every 6 hours)
 

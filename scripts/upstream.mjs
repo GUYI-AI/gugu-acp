@@ -4,7 +4,8 @@
 //   node scripts/upstream.mjs <bridge>          # prints JSON {bridge, current, latest, commit, newer}
 //   node scripts/upstream.mjs <bridge> --bump   # also rewrites bridge.json: tag/commit -> latest, minor version bump
 //
-// "Latest" = highest vX.Y.Z tag (no pre-releases) by semver. Our package version is ours: a new upstream
+// "Latest" = highest vX.Y.Z tag (no pre-releases) by semver. A bridge may be pinned to a pre-release
+// (vX.Y.Z-preview.N), which ranks below vX.Y.Z. Our package version is ours: a new upstream
 // release is a minor bump of our version, regardless of how upstream numbered it.
 import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
@@ -17,14 +18,15 @@ if (!bridgeName) { console.error('usage: upstream.mjs <bridge> [--bump]'); proce
 const file = join(ROOT, 'bridges', bridgeName, 'bridge.json')
 const bridge = JSON.parse(readFileSync(file, 'utf8'))
 
-const parse = (tag) => { const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(tag); return m ? m.slice(1).map(Number) : null }
-const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
+// [major, minor, patch, 1 for a release or 0 for a pre-release]
+const parse = (tag) => { const m = /^v?(\d+)\.(\d+)\.(\d+)(-[\w.]+)?$/.exec(tag); return m ? [...m.slice(1, 4).map(Number), m[4] ? 0 : 1] : null }
+const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3]
 
 const refs = execFileSync('git', ['ls-remote', '--tags', '--refs', bridge.upstream.repo], { encoding: 'utf8' })
 const tags = refs.split('\n').filter(Boolean).map((line) => {
   const [commit, ref] = line.split('\t')
   return { commit, tag: ref.replace('refs/tags/', '') }
-}).filter((t) => parse(t.tag))
+}).filter((t) => parse(t.tag)?.[3] === 1)
 if (tags.length === 0) { console.error(`FAIL step=ls-remote: no vX.Y.Z tags at ${bridge.upstream.repo}`); process.exit(1) }
 tags.sort((a, b) => cmp(parse(a.tag), parse(b.tag)))
 const latest = tags.at(-1)

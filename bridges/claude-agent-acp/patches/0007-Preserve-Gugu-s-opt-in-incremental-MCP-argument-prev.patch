@@ -1,7 +1,8 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 19:26:55 +0800
-Subject: [PATCH] Preserve Gugu's opt-in incremental MCP argument previews
+Subject: [PATCH 07/10] Preserve Gugu's opt-in incremental MCP argument
+ previews
 
 Why: Gugu already ships this behavior for #7536 as a dependency patch.
 Keep it in the source build when taking the repeated-message-start fix,
@@ -10,9 +11,18 @@ so upgrading the bridge does not remove incremental MCP text previews.
 Upstream: none yet; preserves the behavior shipped by Gugu #7536.
 Drop: when upstream supports opt-in incremental MCP string previews,
 including AIR clients, with equivalent split-escape regression tests.
+---
+ src/acp-agent.ts                      |  6 ++++--
+ src/partial-mcp-input.ts              | 16 ++++++++++++++++
+ src/tests/partial-mcp-input.test.ts   | 23 +++++++++++++++++++++++
+ src/tool-calls/client-capabilities.ts |  3 +++
+ src/tool-calls/renderer.ts            |  6 +++---
+ 5 files changed, 49 insertions(+), 5 deletions(-)
+ create mode 100644 src/partial-mcp-input.ts
+ create mode 100644 src/tests/partial-mcp-input.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index df62fbe..92f214a 100644
+index 047c291..b6956bd 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -1,3 +1,4 @@
@@ -20,7 +30,7 @@ index df62fbe..92f214a 100644
  import {
    agent as acpAgent,
    AgentApp,
-@@ -11740,11 +11741,12 @@ export function streamEventToAcpNotifications(
+@@ -13558,11 +13559,12 @@ export function streamEventToAcpNotifications(
            if (inputsForMessage?.size === 0) streamedToolInputs?.delete(streamKey);
            return [];
          }
@@ -87,7 +97,7 @@ index 0000000..0078a9d
 +  })
 +})
 diff --git a/src/tool-calls/client-capabilities.ts b/src/tool-calls/client-capabilities.ts
-index ba771f1..87c755d 100644
+index 9199a04..d2cdaf3 100644
 --- a/src/tool-calls/client-capabilities.ts
 +++ b/src/tool-calls/client-capabilities.ts
 @@ -33,6 +33,8 @@ export class ClientCapabilities {
@@ -108,10 +118,10 @@ index ba771f1..87c755d 100644
    }
  }
 diff --git a/src/tool-calls/renderer.ts b/src/tool-calls/renderer.ts
-index b42b85d..acf80e2 100644
+index 1afa13b..395b74e 100644
 --- a/src/tool-calls/renderer.ts
 +++ b/src/tool-calls/renderer.ts
-@@ -243,8 +243,8 @@ export class AcpToolCallRenderer {
+@@ -282,8 +282,8 @@ export class AcpToolCallRenderer {
     * The report of a tool call from the complete top-level fields of its still
     * streaming input. It carries no content: content built from partial input
     * is misleading (an Edit without its `new_string` renders as a deletion) or
@@ -122,7 +132,7 @@ index b42b85d..acf80e2 100644
     */
    partialRefinement(toolUse: Pick<ToolUse, "id" | "name">, input: unknown, cwd?: string) {
      const facts = this.facts({ name: toolUse.name, input }, cwd);
-@@ -252,7 +252,7 @@ export class AcpToolCallRenderer {
+@@ -291,7 +291,7 @@ export class AcpToolCallRenderer {
        _meta: this.toolUseMeta({ name: toolUse.name, input }, cwd),
        toolCallId: toolUse.id,
        sessionUpdate: "tool_call_update",

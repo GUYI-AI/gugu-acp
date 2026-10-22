@@ -1,0 +1,764 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: gugu-acp <gugu-acp@users.noreply.github.com>
+Date: Wed, 21 Oct 2026 20:16:17 -0700
+Subject: [PATCH 08/10] gugu: serve _session/steering on ACP v2, into any
+ foreground work
+
+Why: Gugu injects a message that arrives while the agent works (a group
+message, a "send now" from the queue) with `_session/steering`, delivered at
+the next tool boundary (0001). The v2 surface did not serve the method and
+filtered it out of the v2 `initialize`, so a v2 client could only queue a
+second prompt behind the running work.
+
+- The v2 surface serves `_session/steering` and advertises it in the top-level
+  `_meta`, as v1 does. A v2 client has no legacy contract to keep: a steer
+  while no work runs returns `promptRequired`, and the client sends the
+  message as a prompt (whose echo hands off a turn held for background
+  subagents).
+- steer() injects while the session has foreground work, not only while a
+  Turn is unsettled: a model cycle that Claude Code started on its own (its
+  follow-up after a background task) is the session's work too. Such a cycle
+  has no Turn, so the steer needs no marks; the cycle's result names the
+  message and ends the work as for any cycle. This replaces the second half
+  of the old 0006, which read Claude Code's global session state instead;
+  v2 reports the foreground work itself, so 0006 is dropped.
+
+Upstream: none yet; extends the steering contract (agentclientprotocol/
+claude-agent-acp#1175 for `delivery: "next"`) to the v2 surface.
+
+Drop when: upstream serves steering on v2, with steering into a cycle that
+Claude Code started on its own.
+---
+ src/acp-agent.ts                              |  33 +++--
+ .../__snapshots__/v2/ask-user-question.jsonl  |   2 +-
+ .../v2/async-task-ends-before-tool-id.jsonl   |   2 +-
+ .../v2/async-task-held-until-tool-id.jsonl    |   2 +-
+ .../v2/async-task-released-at-turn-end.jsonl  |   2 +-
+ .../__snapshots__/v2/bash-background.jsonl    |   2 +-
+ .../__snapshots__/v2/bash-error.jsonl         |   2 +-
+ .../__snapshots__/v2/bash-foreground.jsonl    |   2 +-
+ .../v2/compaction-failed-legacy.jsonl         |   2 +-
+ .../__snapshots__/v2/compaction-legacy.jsonl  |   2 +-
+ .../__snapshots__/v2/compaction-update.jsonl  |   2 +-
+ .../__snapshots__/v2/edit-rejected.jsonl      |   2 +-
+ .../v2/edit-with-permission.jsonl             |   2 +-
+ .../__snapshots__/v2/exit-plan-approve.jsonl  |   2 +-
+ .../__snapshots__/v2/exit-plan-reject.jsonl   |   2 +-
+ .../acp-scenarios/__snapshots__/v2/goal.jsonl |   2 +-
+ .../__snapshots__/v2/grep-and-glob.jsonl      |   2 +-
+ .../__snapshots__/v2/mcp-tool.jsonl           |   2 +-
+ .../__snapshots__/v2/memory-recall.jsonl      |   2 +-
+ .../__snapshots__/v2/network-permission.jsonl |   2 +-
+ .../__snapshots__/v2/notebook-edit.jsonl      |   2 +-
+ .../__snapshots__/v2/permission-denied.jsonl  |   2 +-
+ .../v2/rate-limit-and-origin.jsonl            |   2 +-
+ .../acp-scenarios/__snapshots__/v2/read.jsonl |   2 +-
+ .../v2/session-load-replay.jsonl              |   2 +-
+ .../__snapshots__/v2/session-setup.jsonl      |   2 +-
+ .../__snapshots__/v2/skill.jsonl              |   2 +-
+ .../v2/subagent-agent-async.jsonl             |   2 +-
+ .../v2/subagent-late-child-update.jsonl       |   2 +-
+ .../v2/subagent-native-sessions.jsonl         |   2 +-
+ .../__snapshots__/v2/subagent-nested.jsonl    |   2 +-
+ .../v2/subagent-task-legacy.jsonl             |   2 +-
+ .../v2/subagent-transcript-extension.jsonl    |   2 +-
+ .../__snapshots__/v2/task-create-update.jsonl |   2 +-
+ .../v2/task-output-and-stop.jsonl             |   2 +-
+ .../__snapshots__/v2/text-and-thinking.jsonl  |   2 +-
+ .../__snapshots__/v2/todo-write.jsonl         |   2 +-
+ .../__snapshots__/v2/tool-progress.jsonl      |   2 +-
+ .../v2/web-fetch-and-search.jsonl             |   2 +-
+ .../__snapshots__/v2/write-existing.jsonl     |   2 +-
+ .../__snapshots__/v2/write-new.jsonl          |   2 +-
+ src/tests/acp-v2.test.ts                      | 117 +++++++++++++++++-
+ src/v2/agent.ts                               |  32 ++++-
+ src/v2/initialize.ts                          |  19 +--
+ 44 files changed, 207 insertions(+), 74 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index b6956bd..d9a23eb 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -658,7 +658,7 @@ const TURN_NO_RESULT_MESSAGE =
+  *  than queued as a separate `session/prompt`. Named `_session/steering` per the
+  *  agreed ACP steering wire protocol; advertised to clients via the top-level
+  *  `InitializeResponse._meta.steering.supported`. */
+-const STEER_METHOD = "_session/steering";
++export const STEER_METHOD = "_session/steering";
+ 
+ /** Stops one Claude background task without cancelling the parent prompt turn. */
+ const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
+@@ -738,7 +738,7 @@ export type SteerResponse =
+ /** Validate raw JSON-RPC params into a {@link SteerRequest}. Kept minimal — the
+  *  content blocks are handed to `promptToClaude`, which tolerates unknown block
+  *  types — but `sessionId` and a non-empty `prompt` array are required. */
+-function parseSteerRequest(params: unknown): SteerRequest {
++export function parseSteerRequest(params: unknown): SteerRequest {
+   if (!params || typeof params !== "object") {
+     throw RequestError.invalidParams(undefined, "steer params must be an object");
+   }
+@@ -4314,7 +4314,10 @@ export class ClaudeAcpAgent {
+     // and the active-path push below stay in one synchronous section so the
+     // turn cannot settle in the gap between deciding to inject and enqueueing.
+     const turnInFlight = (session.turnQueue ?? []).find((turn) => !turn.settled);
+-    if (!turnInFlight) {
++    // A model cycle that Claude Code started on its own (its follow-up after a
++    // background task, see ForegroundEvents) has no Turn, but it is the
++    // session's foreground work: a message steered into it joins that work.
++    if (!turnInFlight && !this.foregroundWork.has(sessionId)) {
+       const promptRequest: PromptRequest = {
+         sessionId,
+         prompt: params.prompt,
+@@ -4359,16 +4362,20 @@ export class ClaudeAcpAgent {
+     // check: the interrupt can have the CLI finalizing the aborted cycle by the
+     // time the consumer next runs, and an unmarked result would settle the turn
+     // (see Turn.steeredEchoes).
+-    (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
+-    (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
+-    // A turn already held for background subagents has a recorded outcome the
+-    // steer supersedes: move it into the steer lane so one lane owns settlement.
+-    // The idle handler re-applies the hold through the subagent gate.
+-    if (turnInFlight.deferredSettle !== undefined) {
+-      turnInFlight.steeredSettle = turnInFlight.deferredSettle;
+-      turnInFlight.deferredSettle = undefined;
+-      // The held turn's work had ended at its result; the steer resumes it.
+-      this.startForeground(sessionId, turnInFlight);
++    // A cycle without a Turn needs no marks: its result names the steered
++    // message, and the work ends there as any cycle does.
++    if (turnInFlight) {
++      (turnInFlight.steeredEchoes ??= new Set()).add(steeredUuid);
++      (turnInFlight.steeredUuids ??= new Set()).add(steeredUuid);
++      // A turn already held for background subagents has a recorded outcome the
++      // steer supersedes: move it into the steer lane so one lane owns settlement.
++      // The idle handler re-applies the hold through the subagent gate.
++      if (turnInFlight.deferredSettle !== undefined) {
++        turnInFlight.steeredSettle = turnInFlight.deferredSettle;
++        turnInFlight.deferredSettle = undefined;
++        // The held turn's work had ended at its result; the steer resumes it.
++        this.startForeground(sessionId, turnInFlight);
++      }
+     }
+     (session.sentUserUuids ??= new Set()).add(steeredUuid);
+     session.input.push(userMessage);
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/ask-user-question.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/ask-user-question.jsonl
+index b219f99..70e0fa0 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/ask-user-question.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/ask-user-question.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/async-task-ends-before-tool-id.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/async-task-ends-before-tool-id.jsonl
+index 40e3363..42dd7cf 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/async-task-ends-before-tool-id.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/async-task-ends-before-tool-id.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/async-task-held-until-tool-id.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/async-task-held-until-tool-id.jsonl
+index 40e3363..42dd7cf 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/async-task-held-until-tool-id.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/async-task-held-until-tool-id.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/async-task-released-at-turn-end.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/async-task-released-at-turn-end.jsonl
+index 40e3363..42dd7cf 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/async-task-released-at-turn-end.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/async-task-released-at-turn-end.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/bash-background.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/bash-background.jsonl
+index eab9394..533396d 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/bash-background.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/bash-background.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/bash-error.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/bash-error.jsonl
+index c400ab1..edd0fc5 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/bash-error.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/bash-error.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/bash-foreground.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/bash-foreground.jsonl
+index 55300fc..82924a9 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/bash-foreground.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/bash-foreground.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/compaction-failed-legacy.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/compaction-failed-legacy.jsonl
+index 37b9ad4..a2b45d2 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/compaction-failed-legacy.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/compaction-failed-legacy.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/compaction-legacy.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/compaction-legacy.jsonl
+index a1c54aa..e48bb26 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/compaction-legacy.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/compaction-legacy.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/compaction-update.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/compaction-update.jsonl
+index a1c54aa..e48bb26 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/compaction-update.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/compaction-update.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/edit-rejected.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/edit-rejected.jsonl
+index e80792c..658bef5 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/edit-rejected.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/edit-rejected.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/edit-with-permission.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/edit-with-permission.jsonl
+index 740b708..dec2de2 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/edit-with-permission.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/edit-with-permission.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-approve.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-approve.jsonl
+index 01df73e..3a83662 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-approve.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-approve.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-reject.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-reject.jsonl
+index 38966a3..f3ec149 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-reject.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/exit-plan-reject.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/goal.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/goal.jsonl
+index 868fff8..27a8f29 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/goal.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/goal.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"/goal Ship the feature","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/grep-and-glob.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/grep-and-glob.jsonl
+index a7647da..5f2ea6f 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/grep-and-glob.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/grep-and-glob.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/mcp-tool.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/mcp-tool.jsonl
+index c61d02d..118cf1f 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/mcp-tool.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/mcp-tool.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/memory-recall.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/memory-recall.jsonl
+index 9cf547f..916118b 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/memory-recall.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/memory-recall.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/network-permission.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/network-permission.jsonl
+index 6efc8f8..6e78dbe 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/network-permission.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/network-permission.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/notebook-edit.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/notebook-edit.jsonl
+index 18afe30..fabf6c5 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/notebook-edit.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/notebook-edit.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/permission-denied.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/permission-denied.jsonl
+index 4c0ffdd..c64d423 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/permission-denied.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/permission-denied.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/rate-limit-and-origin.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/rate-limit-and-origin.jsonl
+index a6ae822..41c4ec7 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/rate-limit-and-origin.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/rate-limit-and-origin.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/read.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/read.jsonl
+index 7b25df0..8dc2338 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/read.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/read.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/session-load-replay.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/session-load-replay.jsonl
+index c013178..1145fc8 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/session-load-replay.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/session-load-replay.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[],"messageId":"00000000-0000-4000-8000-00000000c001","sessionUpdate":"user_message"}}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":{"text":"Fix the bug","type":"text"},"messageId":"00000000-0000-4000-8000-00000000c001","sessionUpdate":"user_message_chunk"}}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[],"messageId":"msg_r1","sessionUpdate":"agent_thought"}}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/session-setup.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/session-setup.jsonl
+index b6aab4f..43b68ac 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/session-setup.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/session-setup.jsonl
+@@ -1,2 +1,2 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/skill.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/skill.jsonl
+index f0446f9..eaa1432 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/skill.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/skill.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl
+index ca0dced..d0b3a26 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl
+index 5a99151..e606f34 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl
+index 4a6d022..7942fee 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl
+index 3b9951d..8be3560 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl
+index 5b72124..c2444e1 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl
+index 6f41208..0494f30 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/task-create-update.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/task-create-update.jsonl
+index 4a6bc7e..935ea59 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/task-create-update.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/task-create-update.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/task-output-and-stop.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/task-output-and-stop.jsonl
+index 756e2df..4871267 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/task-output-and-stop.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/task-output-and-stop.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/text-and-thinking.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/text-and-thinking.jsonl
+index af8e5a6..840c159 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/text-and-thinking.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/text-and-thinking.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/todo-write.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/todo-write.jsonl
+index 02feabf..915c604 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/todo-write.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/todo-write.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/tool-progress.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/tool-progress.jsonl
+index d05c19a..1289dfb 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/tool-progress.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/tool-progress.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/web-fetch-and-search.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/web-fetch-and-search.jsonl
+index d16bf0d..57c92c7 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/web-fetch-and-search.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/web-fetch-and-search.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/write-existing.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/write-existing.jsonl
+index 21796c1..ce91501 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/write-existing.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/write-existing.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-scenarios/__snapshots__/v2/write-new.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/write-new.jsonl
+index 62a79b6..9cd1d93 100644
+--- a/src/tests/acp-scenarios/__snapshots__/v2/write-new.jsonl
++++ b/src/tests/acp-scenarios/__snapshots__/v2/write-new.jsonl
+@@ -1,4 +1,4 @@
+-{"kind":"response","method":"initialize","payload":{"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
++{"kind":"response","method":"initialize","payload":{"_meta":{"steering":{"supported":true}},"authMethods":[],"capabilities":{"_meta":{"authStatus":{},"claudeCode":{"promptQueueing":true}},"providers":{},"session":{"additionalDirectories":{},"delete":{},"fork":{},"mcp":{"http":{},"stdio":{}},"prompt":{"embeddedContext":{},"image":{}},"systemPrompt":{"mode":{"override":{}}}}},"info":{"name":"@agentclientprotocol/claude-agent-acp","title":"Claude Agent","version":"<version>"},"protocolVersion":2}}
+ {"kind":"response","method":"session/new","payload":{"availableCommands":[{"description":"Show the MCP servers and their status, or reconnect, enable, or disable a server","input":{"hint":"[reconnect|enable|disable [<server>|all]]","type":"text"},"name":"mcp"}],"configOptions":[{"category":"mode","configId":"mode","currentValue":"default","description":"Session permission mode","name":"Mode","options":[{"description":"Always ask before making changes","name":"Manual","value":"default"},{"description":"Automatically accept all file edits","name":"Accept edits","value":"acceptEdits"},{"description":"Create a plan before making changes","name":"Plan","value":"plan"},{"description":"Claude handles permission decisions","name":"Auto","value":"auto"},{"description":"Accepts all permissions","name":"Bypass permissions","value":"bypassPermissions"}],"type":"select"},{"category":"model","configId":"model","currentValue":"claude-sonnet-4-6","description":"AI model to use","name":"Model","options":[{"description":"Fast","name":"Claude Sonnet 4.6","value":"claude-sonnet-4-6"}],"type":"select"}],"sessionId":"<session>"}}
+ {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
+ {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
+diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
+index ead5f08..38d32c2 100644
+--- a/src/tests/acp-v2.test.ts
++++ b/src/tests/acp-v2.test.ts
+@@ -307,8 +307,8 @@ describe("ACP protocol routing", () => {
+       systemPrompt: { mode: { override: {} } },
+     });
+     expect(response.capabilities?.providers).toEqual({});
+-    // Not `_session/steering`, which v1 advertises in the top-level `_meta`.
+-    expect(response._meta?.steering).toBeUndefined();
++    // `_session/steering`, in the top-level `_meta` as on v1.
++    expect(response._meta?.steering).toEqual({ supported: true });
+     expect(response.authMethods?.length).toBeGreaterThan(0);
+     for (const method of response.authMethods ?? []) {
+       expect(method).not.toHaveProperty("id");
+@@ -5494,3 +5494,116 @@ describe("ACP v2 auth", () => {
+     });
+   });
+ });
++
++describe("ACP v2 extensions", () => {
++  /** The steering request of the ACP steering extension, with next delivery. */
++  const steer = (agent: v2.ClientContext, sessionId: string, message: string) =>
++    agent.request<{ outcome: string; reason?: string }>("_session/steering", {
++      sessionId,
++      prompt: text(message),
++      _meta: { steering: { delivery: "next" } },
++    });
++
++  /** Claude Code's echo of a message it takes in. */
++  const echo = (message: SDKUserMessage, options: Options) => ({
++    type: "user",
++    message: message.message,
++    parent_tool_use_id: null,
++    uuid: message.uuid,
++    session_id: options.sessionId,
++    isReplay: true,
++  });
++
++  it("steers a message into the running turn at the next tool boundary, and leaves it to the client when no work runs", async () => {
++    const steered: SDKUserMessage[] = [];
++    sdk.run = async function* (prompts, options) {
++      const input = prompts[Symbol.asyncIterator]();
++      const first = (await input.next()).value as SDKUserMessage;
++      yield echo(first, options);
++      const steer = (await input.next()).value as SDKUserMessage;
++      steered.push(steer);
++      yield echo(steer, options);
++      yield assistantText(options, "Both done.");
++      yield result(options);
++      yield idleState(options);
++      while (!(await input.next()).done);
++    };
++    const client = v2Client();
++    await client.app.connectWith(connectRouter(), async (agent) => {
++      await initializeV2(agent);
++      const { sessionId } = await agent.request(v2.methods.agent.session.new, { cwd });
++      await agent.request(v2.methods.agent.session.prompt, { sessionId, prompt: text("hi") });
++      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates)).toContain("running"));
++
++      expect(await steer(agent, sessionId, "also this")).toEqual({ outcome: "injected" });
++      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates)).toContain("idle end_turn"));
++      // No work runs: a v2 client sends the message as a prompt itself, also
++      // without asking for that in `_meta.steering.idleBehavior`.
++      expect(await steer(agent, sessionId, "later")).toEqual({
++        outcome: "promptRequired",
++        reason: "noRunningTurn",
++      });
++      await client.authUpdate(1);
++    });
++
++    expect(steered.map((message) => message.priority)).toEqual(["next"]);
++    // One piece of work: the steered message joined the turn.
++    expect(turnTrace(client.sessionUpdates)).toEqual([
++      "user_message",
++      "running",
++      "agent_message_chunk",
++      "idle end_turn",
++    ]);
++  });
++
++  it("steers a message into a cycle that Claude Code started on its own", async () => {
++    const steered: SDKUserMessage[] = [];
++    const cycleRunning = Promise.withResolvers<void>();
++    sdk.run = async function* (prompts, options) {
++      const input = prompts[Symbol.asyncIterator]();
++      const first = (await input.next()).value as SDKUserMessage;
++      yield echo(first, options);
++      yield assistantText(options, "Started the build in the background.");
++      yield result(options);
++      yield idleState(options);
++      // The build finishes, and Claude Code wakes the model to report it.
++      yield assistantText(options, "The build", "msg_followup");
++      cycleRunning.resolve();
++      const steer = (await input.next()).value as SDKUserMessage;
++      steered.push(steer);
++      yield echo(steer, options);
++      yield result(options, { origin: { kind: "task-notification" } });
++      yield idleState(options);
++      while (!(await input.next()).done);
++    };
++    const client = v2Client();
++    await client.app.connectWith(connectRouter(), async (agent) => {
++      await initializeV2(agent);
++      const { sessionId } = await agent.request(v2.methods.agent.session.new, { cwd });
++      await agent.request(v2.methods.agent.session.prompt, { sessionId, prompt: text("hi") });
++      await cycleRunning.promise;
++      await vi.waitFor(() =>
++        expect(turnTrace(client.sessionUpdates).filter((s) => s === "running")).toHaveLength(2),
++      );
++
++      expect(await steer(agent, sessionId, "and the tests?")).toEqual({ outcome: "injected" });
++      await vi.waitFor(() =>
++        expect(turnTrace(client.sessionUpdates).filter((s) => s.startsWith("idle"))).toHaveLength(
++          2,
++        ),
++      );
++      await client.authUpdate(1);
++    });
++
++    expect(steered.map((message) => message.priority)).toEqual(["next"]);
++    expect(turnTrace(client.sessionUpdates)).toEqual([
++      "user_message",
++      "running",
++      "agent_message_chunk",
++      "idle end_turn",
++      "running",
++      "agent_message_chunk",
++      "idle end_turn",
++    ]);
++  });
++});
+diff --git a/src/v2/agent.ts b/src/v2/agent.ts
+index 9d1101b..f163584 100644
+--- a/src/v2/agent.ts
++++ b/src/v2/agent.ts
+@@ -14,7 +14,15 @@ import type {
+   RequestPermissionResponse,
+ } from "@agentclientprotocol/sdk/unstable";
+ import * as v2 from "@agentclientprotocol/sdk/experimental/v2/unstable";
+-import { ClaudeAcpAgent, type AcpClient, type Logger } from "../acp-agent.js";
++import {
++  ClaudeAcpAgent,
++  parseSteerRequest,
++  STEER_METHOD,
++  type AcpClient,
++  type Logger,
++  type SteerRequest,
++  type SteerResponse,
++} from "../acp-agent.js";
+ import type { AcpSessionNotification } from "../acp-subagents.js";
+ import type { AcpPermissionRequest } from "../permissions/presentation.js";
+ import { v1InitializeRequest, v2InitializeResponse } from "./initialize.js";
+@@ -129,7 +137,27 @@ export function v2AgentApp(
+         void client.send({ sessionId: params.sessionId, update });
+       }),
+     )
+-    .onNotification(v2.methods.agent.session.cancel, ({ params }) => agent.cancel(params));
++    .onNotification(v2.methods.agent.session.cancel, ({ params }) => agent.cancel(params))
++    .onRequest<SteerRequest, SteerResponse>(
++      STEER_METHOD,
++      { parse: parseSteerRequest },
++      ({ params }) => v2Steer(agent, params),
++    );
++}
++
++/**
++ * Serves `_session/steering` as on v1. A v2 client has no legacy steering
++ * contract to keep, so a steer while no work runs always leaves the message to
++ * the client (`promptRequired`), which sends it as a prompt.
++ */
++function v2Steer(agent: ClaudeAcpAgent, params: SteerRequest): Promise<SteerResponse> {
++  return agent.steer({
++    ...params,
++    _meta: {
++      ...params._meta,
++      steering: { ...params._meta?.steering, idleBehavior: "promptRequired" },
++    },
++  });
+ }
+ 
+ /** The `state_update` that reports `state` as the current foreground state. */
+diff --git a/src/v2/initialize.ts b/src/v2/initialize.ts
+index 2a91091..a094811 100644
+--- a/src/v2/initialize.ts
++++ b/src/v2/initialize.ts
+@@ -54,27 +54,12 @@ export function v1InitializeRequest(request: v2.InitializeRequest): InitializeRe
+   };
+ }
+ 
+-/**
+- * The top-level `_meta` keys of the agent's v1 `initialize` response that
+- * advertise an extension the v2 surface does not serve yet: `steering`, for
+- * `_session/steering`.
+- */
+-const UNSERVED_EXTENSION_KEYS: readonly string[] = ["steering"];
+-
+-/**
+- * The v2 `initialize` response for the v1 response of the agent.
+- *
+- * It does not advertise what the v2 surface does not serve yet: the
+- * extensions of {@link UNSERVED_EXTENSION_KEYS}.
+- */
++/** The v2 `initialize` response for the v1 response of the agent. */
+ export function v2InitializeResponse(response: InitializeResponse): v2.InitializeResponse {
+   if (!response.agentInfo) {
+     throw new Error("ACP v2 requires agentInfo, and the agent reported none");
+   }
+   const meta = response.agentCapabilities?._meta;
+-  const topMeta = Object.fromEntries(
+-    Object.entries(response._meta ?? {}).filter(([key]) => !UNSERVED_EXTENSION_KEYS.includes(key)),
+-  );
+   return {
+     protocolVersion: v2.PROTOCOL_VERSION,
+     info: response.agentInfo,
+@@ -88,7 +73,7 @@ export function v2InitializeResponse(response: InitializeResponse): v2.Initializ
+       ...(meta != null ? { _meta: meta } : {}),
+     },
+     authMethods: (response.authMethods ?? []).map(v2AuthMethod),
+-    ...(Object.keys(topMeta).length > 0 ? { _meta: topMeta } : {}),
++    ...(response._meta != null ? { _meta: response._meta } : {}),
+   };
+ }
+ 

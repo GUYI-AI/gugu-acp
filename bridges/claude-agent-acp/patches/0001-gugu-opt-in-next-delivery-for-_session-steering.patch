@@ -1,7 +1,7 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 24 Sep 2026 15:14:26 +0800
-Subject: [PATCH] gugu: opt-in `next` delivery for _session/steering
+Subject: [PATCH 01/10] gugu: opt-in `next` delivery for _session/steering
 
 Why: Gugu injects group messages that arrive mid-turn via _session/steering
 and wants them to enter at the next tool boundary (SDK priority `next`)
@@ -19,10 +19,10 @@ semantics.
  2 files changed, 56 insertions(+), 4 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 4714df2..6cef0f9 100644
+index 8eee989..06a3355 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -586,10 +586,13 @@ function parseAsyncTaskStopRequest(value: unknown): AsyncTaskStopRequest {
+@@ -694,10 +694,13 @@ function parseAsyncTaskStopRequest(value: unknown): AsyncTaskStopRequest {
  
  /** How urgently the SDK delivers a steered message relative to the running
   *  turn — an internal Claude implementation detail, not part of the wire
@@ -39,7 +39,7 @@ index 4714df2..6cef0f9 100644
  const STEER_PRIORITY_LATER = "later" as const;
  
  /** Request-level steering options. `promptRequired` is opt-in so existing Hosts
-@@ -598,6 +601,9 @@ type SteerMeta = {
+@@ -706,6 +709,9 @@ type SteerMeta = {
    [key: string]: unknown;
    steering?: {
      idleBehavior?: "promptRequired";
@@ -49,7 +49,7 @@ index 4714df2..6cef0f9 100644
    };
  };
  
-@@ -642,6 +648,13 @@ function parseSteerRequest(params: unknown): SteerRequest {
+@@ -750,6 +756,13 @@ function parseSteerRequest(params: unknown): SteerRequest {
    if (idleBehavior !== undefined && idleBehavior !== "promptRequired") {
      throw RequestError.invalidParams(undefined, "unsupported steering idleBehavior");
    }
@@ -63,24 +63,24 @@ index 4714df2..6cef0f9 100644
    return {
      sessionId,
      prompt: prompt as PromptRequest["prompt"],
-@@ -3869,7 +3882,11 @@ export class ClaudeAcpAgent {
+@@ -4334,7 +4347,11 @@ export class ClaudeAcpAgent {
      // Deliver into the running turn rather than queuing behind it as a fresh
      // prompt would.
      userMessage.priority =
--      (session.pendingUserInputCount ?? 0) > 0 ? STEER_PRIORITY_LATER : STEER_PRIORITY_NOW;
+-      (session.openUserInputs?.size ?? 0) > 0 ? STEER_PRIORITY_LATER : STEER_PRIORITY_NOW;
 +      params._meta?.steering?.delivery === "next"
 +        ? STEER_PRIORITY_NEXT
-+        : (session.pendingUserInputCount ?? 0) > 0
++        : (session.openUserInputs?.size ?? 0) > 0
 +          ? STEER_PRIORITY_LATER
 +          : STEER_PRIORITY_NOW;
      // Mark before the push and in the same synchronous section as the in-flight
      // check: the interrupt can have the CLI finalizing the aborted cycle by the
      // time the consumer next runs, and an unmarked result would settle the turn
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index ccf9de0..1307164 100644
+index 8f14282..3b10026 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -19506,6 +19506,41 @@ describe("turn steering (_session/steering)", () => {
+@@ -24105,6 +24105,41 @@ describe("turn steering (_session/steering)", () => {
      ]);
    }
  
@@ -119,6 +119,6 @@ index ccf9de0..1307164 100644
 +    expect(captured[0].priority).toBe("next");
 +  });
 +
-   it.each([
+   /** Every request to the client that waits for the user, started with the signal that withdraws it. */
+   const userInputRequests = [
      {
-       name: "a permission request",
