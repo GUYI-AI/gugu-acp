@@ -71,10 +71,10 @@ console.log(`== apply ${patches.length} patch(es)`)
 for (const p of patches) {
   try {
     run('git', ['-c', 'user.name=gugu-acp', '-c', 'user.email=gugu-acp@users.noreply.github.com',
-      'am', '-q', '-3', '--keep-cr', join(patchDir, p)], { cwd: src })
-  } catch {
+      'am', '-q', '--3way', '--keep-cr', join(patchDir, p)], { cwd: src })
+  } catch (error) {
     try { run('git', ['am', '--abort'], { cwd: src }) } catch { /* nothing to abort */ }
-    fail(3, 'apply', `${p} does not apply on ${tag} (${commit})`)
+    fail(3, 'apply', `${p}: git am --3way exited ${error.status} on ${tag} (${commit})`)
   }
 }
 
