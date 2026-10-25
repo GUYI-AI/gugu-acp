@@ -28,6 +28,9 @@ jobs:
       matrix:
         bridge: [claude-agent-acp, pi-acp]
     env:
+      # git am --3way may need a committer for its synthetic merge base.
+      GIT_COMMITTER_NAME: gugu-acp bot
+      GIT_COMMITTER_EMAIL: gugu-acp@users.noreply.github.com
       GH_TOKEN: ${{ github.token }}
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
       # Only abc.mjs hands these to the CLI (as ANTHROPIC_*); builds and upstream tests never see them.

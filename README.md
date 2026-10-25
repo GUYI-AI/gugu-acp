@@ -10,7 +10,7 @@ Gugu's builds of third-party ACP bridges — the adapters that sit between Gugu'
 bridges/<name>/
   bridge.json     our package name + version, the upstream repo/tag/commit we build from, the CLI it drives
                   ("pairing": false = no CLI-version pairing yet: no ABC, no compat.json entry)
-  patches/*.patch our changes, as `git format-patch` files applied with `git am -3` on the upstream tag
+  patches/*.patch our changes, as `git format-patch` files applied with `git apply --3way` on the upstream tag
 compat.json       which of our releases serves which CLI version (see below)
 scripts/          build · abc · publish · upstream · compat · follow
 .github/workflows ci (patches apply + build + tests) · follow (unattended upstream/CLI tracking)

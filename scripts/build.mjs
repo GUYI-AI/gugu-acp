@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Build one bridge: clone upstream at the pinned tag, apply our patches with a three-way `git am`,
+// Build one bridge: clone upstream at the pinned tag, apply our patches with `git apply --3way`,
 // build, run the upstream test suite (which also carries our patch tests), then stamp and pack it
 // as the @gugu-acp package.
 //
@@ -67,14 +67,20 @@ if (!opts.tag && commit !== bridge.upstream.commit) {
 
 const patchDir = join(bridgeDir, 'patches')
 const patches = existsSync(patchDir) ? readdirSync(patchDir).filter((f) => f.endsWith('.patch')).sort() : []
+// Keep the previous pin's history available for git apply --3way.
+const patchBase = JSON.parse(execFileSync('git', ['show', `HEAD:bridges/${opts.bridge}/bridge.json`], {
+  cwd: ROOT, encoding: 'utf8',
+})).upstream.commit
+if (patches.length && commit !== patchBase) {
+  run('git', ['fetch', '-q', '--depth', '1', 'origin', patchBase], { cwd: src })
+}
+
 console.log(`== apply ${patches.length} patch(es)`)
 for (const p of patches) {
   try {
-    run('git', ['-c', 'user.name=gugu-acp', '-c', 'user.email=gugu-acp@users.noreply.github.com',
-      'am', '-q', '-3', '--keep-cr', join(patchDir, p)], { cwd: src })
-  } catch {
-    try { run('git', ['am', '--abort'], { cwd: src }) } catch { /* nothing to abort */ }
-    fail(3, 'apply', `${p} does not apply on ${tag} (${commit})`)
+    run('git', ['apply', '--3way', join(patchDir, p)], { cwd: src })
+  } catch (error) {
+    fail(3, 'apply', `${p}: git apply --3way exited ${error.status} on ${tag} (${commit})`)
   }
 }
 

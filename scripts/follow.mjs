@@ -96,7 +96,8 @@ function onNpm(spec) {
 function buildOrReport(label) {
   const b = node('build.mjs', [bridgeName], { stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024 })
   if (b.status !== 0) {
-    const why = { 3: 'a patch no longer applies', 4: 'build failed', 5: 'upstream + patch tests failed' }[b.status] ?? `exit ${b.status}`
+    if (b.stderr) process.stderr.write(b.stderr)
+    const why = { 3: 'patch command failed', 4: 'build failed', 5: 'upstream + patch tests failed' }[b.status] ?? `exit ${b.status}`
     report(`${bridgeName}: ${label} needs attention (${why})`, fence((b.stderr || '').slice(-4000)))
   }
   return lastLine(b.stdout)
