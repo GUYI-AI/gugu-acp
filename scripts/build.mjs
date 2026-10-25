@@ -67,17 +67,12 @@ if (!opts.tag && commit !== bridge.upstream.commit) {
 
 const patchDir = join(bridgeDir, 'patches')
 const patches = existsSync(patchDir) ? readdirSync(patchDir).filter((f) => f.endsWith('.patch')).sort() : []
-// A new tag does not contain the custom preimages referenced by our patch series.
-// Recreate those blobs in an isolated index so git am --3way can use them.
+// Keep the previous pin's history available for git am --3way.
 const patchBase = JSON.parse(execFileSync('git', ['show', `HEAD:bridges/${opts.bridge}/bridge.json`], {
   cwd: ROOT, encoding: 'utf8',
 })).upstream.commit
 if (patches.length && commit !== patchBase) {
-  console.log(`== reconstruct patch base ${patchBase}`)
   run('git', ['fetch', '-q', '--depth', '1', 'origin', patchBase], { cwd: src })
-  const env = { ...cleanEnv, GIT_INDEX_FILE: join(work, 'patch-base.index') }
-  run('git', ['read-tree', patchBase], { cwd: src, env })
-  for (const p of patches) run('git', ['apply', '--cached', join(patchDir, p)], { cwd: src, env })
 }
 
 console.log(`== apply ${patches.length} patch(es)`)
