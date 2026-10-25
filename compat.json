@@ -137,6 +137,18 @@
               "how": "abc (CI, upstream v0.94.1-preview.4)"
             }
           ]
+        },
+        {
+          "version": "1.6.0",
+          "upstreamTag": "v0.95.0",
+          "cliFrom": "2.1.310",
+          "verified": [
+            {
+              "cli": "2.1.310",
+              "at": "2026-10-25",
+              "how": "abc (CI, upstream v0.95.0)"
+            }
+          ]
         }
       ]
     }
