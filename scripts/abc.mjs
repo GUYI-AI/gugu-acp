@@ -55,6 +55,7 @@ child.on('exit', (code, signal) => { if (!done) verdict('RIG-FAIL', { step: 'bri
 
 let id = 0; const pending = new Map()
 const idleWaiters = new Map()
+const updates = []
 const nextIdle = (sid) => new Promise((res) => idleWaiters.set(sid, res))
 const send = (obj) => child.stdin.write(JSON.stringify(obj) + '\n')
 const call = (method, params) => new Promise((res, rej) => { const i = ++id; pending.set(i, { res, rej }); send({ jsonrpc: '2.0', id: i, method, params }) })
@@ -63,8 +64,13 @@ readline.createInterface({ input: child.stdout }).on('line', (line) => {
   if (m.id !== undefined && (m.result !== undefined || m.error !== undefined) && pending.has(m.id)) {
     const p = pending.get(m.id); pending.delete(m.id); m.error ? p.rej(m.error) : p.res(m.result); return
   }
-  if (m.method === 'session/update' && m.params.update.sessionUpdate === 'state_update' && m.params.update.state === 'idle') {
-    idleWaiters.get(m.params.sessionId)?.(m.params.update); idleWaiters.delete(m.params.sessionId); return
+  if (m.method === 'session/update' && ['state_update', 'subagent_update'].includes(m.params.update.sessionUpdate)) {
+    const observed = { order: updates.length, at: new Date().toISOString(), ...m.params }
+    updates.push(observed)
+    if (m.params.update.sessionUpdate === 'state_update' && m.params.update.state === 'idle') {
+      idleWaiters.get(m.params.sessionId)?.({ ...m.params.update, observed }); idleWaiters.delete(m.params.sessionId)
+    }
+    return
   }
   if (m.method === 'session/request_permission') {
     const opt = m.params.options.find((o) => o.kind?.startsWith('allow')) ?? m.params.options[0]
@@ -82,6 +88,9 @@ const prompt = async (sid, text) => {
   return idle
 }
 const ended = (r) => r !== TIMEOUT && r?.stopReason === 'end_turn'
+const waitFor = async (read) => {
+  for (;;) { const value = read(); if (value) return value; await sleep(50) }
+}
 
 let sid
 try {
@@ -97,13 +106,27 @@ try {
   if (!ended(a)) verdict('FAIL', { step: 'A' })
   await sleep(4000)
 
-  const bStart = Date.now()
+  const bStart = Date.now(), beforeB = updates.length
   const b = await withTimeout(prompt(sid, 'Launch exactly ONE background subagent with the Agent tool (subagent_type general-purpose, run_in_background true). Its task: run the Bash command `sleep 15` and then reply with the single word done. After launching it, reply with just the word launched and end your turn without waiting.'), 180_000)
   results.B = b === TIMEOUT ? 'timeout' : b.stopReason; results.Bms = Date.now() - bStart; log('B', results.B, results.Bms)
   if (!ended(b)) verdict('FAIL', { step: 'B' })
-  // The subagent sleeps 15 s; a turn held for it ends after it.
-  if (results.Bms >= 15_000) verdict('FAIL', { step: 'B/held-for-subagent' })
-  await sleep(45_000) // the subagent finishes and its follow-up cycle runs
+  const completion = await withTimeout(waitFor(() => {
+    const children = updates.slice(beforeB).filter((e) => e.sessionId === sid && e.update.sessionUpdate === 'subagent_update')
+    if (new Set(children.map((e) => e.update.sessionId)).size > 1) return { error: 'expected exactly one subagent' }
+    return children.find((e) => e.update.state?.state === 'idle')
+  }), 180_000)
+  if (completion === TIMEOUT || completion.error) verdict('FAIL', { step: 'B/subagent-completion', detail: completion === TIMEOUT ? 'not observed' : completion.error })
+  results.BOrder = {
+    parentEnd: { order: b.observed.order, at: b.observed.at },
+    childComplete: { order: completion.order, at: completion.at, sessionId: completion.update.sessionId, stopReason: completion.update.state.stopReason },
+  }
+  if (completion.update.state.stopReason !== 'end_turn' || b.observed.order >= completion.order) verdict('FAIL', { step: 'B/held-for-subagent' })
+  // Drain the completion's autonomous turn before C, including frames already read in the same chunk.
+  const followup = await withTimeout(waitFor(() => {
+    const running = updates.find((e) => e.order > completion.order && e.sessionId === sid && e.update.sessionUpdate === 'state_update' && e.update.state === 'running')
+    return running && updates.find((e) => e.order > running.order && e.sessionId === sid && e.update.sessionUpdate === 'state_update' && e.update.state === 'idle')
+  }), 180_000)
+  if (followup === TIMEOUT) verdict('FAIL', { step: 'B/completion-cycle' })
 
   const c0 = prompt(sid, 'Run the Bash command `sleep 20`, then reply with just: ok')
   await sleep(6000)
