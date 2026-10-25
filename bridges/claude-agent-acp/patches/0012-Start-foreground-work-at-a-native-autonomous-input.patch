@@ -1,83 +1,129 @@
-From 159e389b872bf3e9916476f984a47ea55786f28b Mon Sep 17 00:00:00 2001
+From 0ced5398a6c251b4ea39bc131fc1bb23ffe155f4 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 02:38:13 +0000
-Subject: [PATCH] Start foreground work at a native autonomous input
+Subject: [PATCH] Start autonomous foreground work at the CLI request boundary
 
-Why: Claude Code can deliver a structured task-notification input before
-any assistant output. Waiting for that output leaves the client's
-foreground state idle throughout model generation. Reuse the existing
-native origin predicate and the current foreground owner; child messages
-and unrelated user-role frames still start no main foreground cycle.
+Why: Claude Code persists task-notification input without emitting it as a live SDK user frame. After a valid task notification, its next init or requesting frame starts foreground work before assistant output. Keep task completion alone idle and retain the existing foreground lifecycle.
 
 Upstream: none yet.
-Drop when: upstream starts an autonomous foreground cycle on its native
-input, before the first assistant output.
+
+Drop when: upstream starts autonomous foreground work at the native request boundary.
 ---
- src/acp-agent.ts         |  13 ++--
- src/tests/acp-v2.test.ts | 138 +++++++++++++++++++++++++++++++++++++++
- 2 files changed, 146 insertions(+), 5 deletions(-)
+ src/acp-agent.ts         |  33 +++++---
+ src/tests/acp-v2.test.ts | 173 ++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 194 insertions(+), 12 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 3eac5e7..1225ad0 100644
+index 3eac5e7..dd1d80f 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -9778,14 +9778,16 @@ export class ClaudeAcpAgent {
+@@ -1473,6 +1473,8 @@ export type Session = {
+    *  yields none, and a pre-counted debt that never drains would mask one
+    *  future issue-#825 detection. */
+   lastSessionState?: "idle" | "running" | "requires_action";
++  /** A valid background notification whose next CLI request has not started. */
++  autonomousTaskNotified?: boolean;
+   /** How many trailing `session_state_changed: idle` messages are already
+    *  accounted for: every result is followed by one (user-turn results that
+    *  terminate a turn — settle, reject, or orphan skip — and autonomous
+@@ -6533,6 +6535,9 @@ export class ClaudeAcpAgent {
+                 // resumed it, and the end of an earlier delegation ends
+                 // nothing: the child and its live task belong to the new run.
+                 if (subagents.isStaleEnd(message.task_id, message.tool_use_id)) break;
++                if (!this.foregroundWork.has(params.sessionId) && !session.cancelled) {
++                  session.autonomousTaskNotified = true;
++                }
+                 // The task settled — no further tool calls can originate
+                 // from it, so its registry entry can be dropped.
+                 await subagents.finishTask(
+@@ -9778,15 +9783,20 @@ export class ClaudeAcpAgent {
    }
  
    /** Start a model cycle that Claude Code started on its own as the foreground
 -   *  work (see {@link ForegroundEvents}) when `message` is its first output:
 -   *  model output of the main conversation (not a subagent's) while no work
 -   *  runs. That includes a turn that v1 holds for its background subagents,
-+   *  work (see {@link ForegroundEvents}) when its native task-notification
-+   *  input arrives, before model output. Main-conversation output also
-+   *  identifies a cycle when no work runs. That includes a turn that v1 holds
-+   *  for its background subagents,
++   *  work at the CLI request boundary after a task notification. The Native
++   *  user/origin record is not sent on the SDK wire. Output also identifies
++   *  a cycle when no request boundary reached us. That includes a turn that
++   *  v1 holds for its background subagents,
     *  whose work ended at its result, so its follow-up is a cycle. Output of
     *  the work a cancel stopped starts nothing (see Session.cancelled). */
    private startAutonomousCycle(sessionId: string, session: Session, message: SDKMessage): void {
++    const autonomousRequest = session.autonomousTaskNotified && message.type === "system" &&
++      (message.subtype === "init" || (message.subtype === "status" && message.status === "requesting"));
++    if (autonomousRequest) session.autonomousTaskNotified = false;
      if (this.foregroundWork.has(sessionId) || session.cancelled) return;
 -    if (message.type !== "assistant" && message.type !== "stream_event") return;
-+    const autonomousInput = message.type === "user" && isTaskNotificationRecord(message);
-+    if (message.type !== "assistant" && message.type !== "stream_event" && !autonomousInput) return;
-     if (message.parent_tool_use_id !== null) return;
+-    if (message.parent_tool_use_id !== null) return;
++    const output = (message.type === "assistant" || message.type === "stream_event") &&
++      message.parent_tool_use_id === null;
++    if (!autonomousRequest && !output) return;
      // A turn that Claude Code started is the foreground work already. Without
      // lifecycle frames, a queued turn's output can come before its echo, so
-@@ -9794,7 +9796,8 @@ export class ClaudeAcpAgent {
+     // output while a turn is queued may be that turn's. With them, a turn that
+@@ -9794,7 +9804,9 @@ export class ClaudeAcpAgent {
      const queued = (session.turnQueue ?? []).some(
        (turn) => !turn.settled && turn !== session.activeTurn,
      );
 -    if (queued && !session.msgLifecycleV1) return;
-+    // Unlike un-attributed output, this native input names its own origin.
-+    if (queued && !session.msgLifecycleV1 && !autonomousInput) return;
++    // A request after the notification starts its cycle ahead of queued input.
++    if (queued && !session.msgLifecycleV1 && !autonomousRequest) return;
++    session.autonomousTaskNotified = false;
      this.startForeground(sessionId, AUTONOMOUS_CYCLE);
    }
  
+@@ -9810,11 +9822,12 @@ export class ClaudeAcpAgent {
+       : !session.activeTurn && !this.runsAutonomousCycle(sessionId);
+   }
+ 
+-  /** Whether the consumer drops what it reaches now as output of the work a
+-   *  cancel stopped: the client has been told that the work ended, and the
+-   *  window after the cancel is still open (see Session.cancelled). */
++  /** Do not begin showing a cancelled cycle's output. A cycle already shown
++   *  may flush its tail before idle; stopped work whose end was reported
++   *  stays dropped while the cancel's window is open (see Session.cancelled). */
+   private dropsStoppedWorkOutput(sessionId: string, session: Session): boolean {
+-    return session.cancelled && this.workEndReported(sessionId, session);
++    const unseenCycle = this.runsAutonomousCycle(sessionId) && !session.emittedAssistantText;
++    return session.cancelled && (unseenCycle || this.workEndReported(sessionId, session));
+   }
+ 
+   /**
 diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
-index 45bd4c2..dd268e1 100644
+index 45bd4c2..8ad1e4b 100644
 --- a/src/tests/acp-v2.test.ts
 +++ b/src/tests/acp-v2.test.ts
-@@ -2382,6 +2382,144 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+@@ -2382,6 +2382,171 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
      return client;
    }
  
-+  it("starts an autonomous cycle at its native input while assistant output is delayed", async () => {
++  // CLI 2.1.310 stdio trace: task_notification -> init -> requesting ->
++  // delayed stream_event. The persisted user/origin record is not on this wire.
++  const completedTask = (options: Options) => ({
++    type: "system", subtype: "task_notification", task_id: "background-task",
++    tool_use_id: "toolu_background", status: "completed", output_file: "",
++    summary: "done", uuid: randomUUID(), session_id: options.sessionId,
++  });
++  const requestBoundary = (options: Options, boundary: string) => ({
++    type: "system", subtype: boundary === "init" ? "init" : "status",
++    ...(boundary === "init" ? {} : { status: "requesting" }),
++    uuid: randomUUID(), session_id: options.sessionId,
++  });
++
++  it.each(["init", "requesting"])("starts at the CLI %s boundary before autonomous output", async (boundary) => {
++    const notificationConsumed = Promise.withResolvers<void>();
++    const requestAllowed = Promise.withResolvers<void>();
 +    const inputConsumed = Promise.withResolvers<void>();
 +    const outputAllowed = Promise.withResolvers<void>();
 +    scriptTurns(async function* (options) {
 +      yield assistantText(options, "Started a background task.");
 +      yield result(options);
 +      yield idleState(options);
-+      // Same structured origin as Claude Code's persisted task-notification
-+      // input (also exercised by the native-history tests), without parsing text.
-+      yield {
-+        type: "user",
-+        uuid: "autonomous-input",
-+        session_id: options.sessionId,
-+        parent_tool_use_id: null,
-+        isReplay: true,
-+        origin: { kind: "task-notification" },
-+        message: { role: "user", content: "Background task completed." },
-+      };
++      yield completedTask(options);
++      notificationConsumed.resolve();
++      await requestAllowed.promise;
++      yield requestBoundary(options, boundary);
 +      inputConsumed.resolve();
 +      await outputAllowed.promise;
 +      yield assistantText(options, "The task finished.", "msg_followup");
@@ -85,12 +131,16 @@ index 45bd4c2..dd268e1 100644
 +      yield idleState(options);
 +    });
 +    const client = await promptAndWait(2, async (_agent, _sessionId, client) => {
++      await notificationConsumed.promise;
++      expect(turnTrace(client.sessionUpdates)).toEqual(endedTurn);
++      requestAllowed.resolve();
 +      await inputConsumed.promise;
 +      try {
 +        await vi.waitFor(() =>
 +          expect(turnTrace(client.sessionUpdates)).toEqual([...endedTurn, "running"]),
 +        );
 +      } finally {
++        requestAllowed.resolve();
 +        outputAllowed.resolve();
 +      }
 +    });
@@ -102,7 +152,7 @@ index 45bd4c2..dd268e1 100644
 +    ]);
 +  });
 +
-+  it("starts at autonomous input before a queued human prompt without lifecycle frames", async () => {
++  it("starts at the CLI request boundary before a queued human prompt without lifecycle frames", async () => {
 +    const inputConsumed = Promise.withResolvers<void>();
 +    const outputAllowed = Promise.withResolvers<void>();
 +    sdk.run = async function* (prompts, options) {
@@ -120,15 +170,9 @@ index 45bd4c2..dd268e1 100644
 +      yield result(options);
 +      yield idleState(options);
 +      const queued = (await input.next()).value;
-+      yield {
-+        type: "user",
-+        uuid: "autonomous-input-before-queued",
-+        session_id: options.sessionId,
-+        parent_tool_use_id: null,
-+        isReplay: true,
-+        origin: { kind: "task-notification" },
-+        message: { role: "user", content: "Background task completed." },
-+      };
++      yield completedTask(options);
++      yield requestBoundary(options, "init");
++      yield requestBoundary(options, "requesting");
 +      inputConsumed.resolve();
 +      await outputAllowed.promise;
 +      yield assistantText(options, "The task finished.", "msg_followup");
@@ -155,6 +199,27 @@ index 45bd4c2..dd268e1 100644
 +        outputAllowed.resolve();
 +        await receipt;
 +      }
++    });
++  });
++
++  it.each(["init", "requesting"])("does not start at a CLI %s without a task notification", async (boundary) => {
++    const consumed = Promise.withResolvers<void>();
++    const outputAllowed = Promise.withResolvers<void>();
++    scriptTurns(async function* (options) {
++      yield assistantText(options, "Done.");
++      yield result(options);
++      yield idleState(options);
++      yield requestBoundary(options, boundary);
++      consumed.resolve();
++      await outputAllowed.promise;
++      yield assistantText(options, "Follow-up.", "msg_followup");
++      yield followupResult(options);
++      yield idleState(options);
++    });
++    await promptAndWait(2, async (_agent, _sessionId, client) => {
++      await consumed.promise;
++      try { expect(turnTrace(client.sessionUpdates)).toEqual(endedTurn); }
++      finally { outputAllowed.resolve(); }
 +    });
 +  });
 +
@@ -201,6 +266,28 @@ index 45bd4c2..dd268e1 100644
    it("reports a cycle after the turn ended as running, then idle with the cycle's usage", async () => {
      scriptTurns(async function* (options) {
        yield assistantText(options, "Started the build in the background.");
+@@ -3733,8 +3898,10 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+       yield followupResult(options);
+       yield idleState(options);
+     });
+-    const client = await promptAndWait(2, async (agent, sessionId, client) => {
+-      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates)).toEqual(endedTurn));
++    // The request boundary now exposes the cycle before output, so stopping
++    // it must also expose its cancelled idle before the later cycle starts.
++    const client = await promptAndWait(3, async (agent, sessionId, client) => {
++      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates)).toEqual([...endedTurn, "running"]));
+       await vi.waitFor(() =>
+         expect(agents[0].sessions[sessionId]?.modelRequestSinceResult).toBe(true),
+       );
+@@ -3744,6 +3911,8 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+     expect(turnTrace(client.sessionUpdates)).toEqual([
+       ...endedTurn,
+       "running",
++      "idle cancelled",
++      "running",
+       "agent_message_chunk",
+       "idle end_turn",
+     ]);
 -- 
 2.43.0
 
