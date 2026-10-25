@@ -31,7 +31,7 @@ Each patch's commit message states three things: **Why** it is needed, the **Ups
 `compat.json` is our declaration, not upstream's. Upstream's `claudeCodeVersion` (the CLI version an SDK was cut with) is only a starting point. A CLI version enters a release's `verified` list only after our **ABC** check passed:
 
 - **A** a plain turn ends;
-- **B** a turn that launches a background subagent ends, before the subagent does;
+- **B** a turn that launches a background subagent ends, before the subagent does (by observed protocol frame order, not a duration limit);
 - **C** a turn that receives a mid-turn `_session/steering` message with `delivery: "next"` (how Gugu injects group messages) ends.
 
 A bridge's releases live under its `bridge.json` `compat` key (default: the bridge's name). Gugu reads only the key it was built for, so a release a released Gugu must never pair with gets a new key and the old key is frozen: `claude-agent-acp` holds the ACP v1 releases (frozen at 1.4.x, read by Gugu builds that speak v1 to the bridge); `claude-agent-acp-v2` holds the releases from 1.5.0 on, which Gugu drives over ACP v2. The old key goes once no Gugu in use reads it.
