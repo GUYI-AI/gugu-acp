@@ -1,0 +1,144 @@
+From 36c453f5f5c9b3f4157f061c1a9e98558728855e Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 02:38:13 +0000
+Subject: [PATCH] Start foreground work at a native autonomous input
+
+Why: Claude Code can deliver a structured task-notification input before
+any assistant output. Waiting for that output leaves the client's
+foreground state idle throughout model generation. Reuse the existing
+native origin predicate and the current foreground owner; child messages
+and unrelated user-role frames still start no main foreground cycle.
+
+Upstream: none yet.
+Drop when: upstream starts an autonomous foreground cycle on its native
+input, before the first assistant output.
+---
+ src/acp-agent.ts         | 14 +++++--
+ src/tests/acp-v2.test.ts | 82 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 92 insertions(+), 4 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 3eac5e7..aa83b5a 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -9778,14 +9778,20 @@ export class ClaudeAcpAgent {
+   }
+ 
+   /** Start a model cycle that Claude Code started on its own as the foreground
+-   *  work (see {@link ForegroundEvents}) when `message` is its first output:
+-   *  model output of the main conversation (not a subagent's) while no work
+-   *  runs. That includes a turn that v1 holds for its background subagents,
++   *  work (see {@link ForegroundEvents}) when its native task-notification
++   *  input arrives, before model output. Main-conversation output also
++   *  identifies a cycle when no work runs. That includes a turn that v1 holds
++   *  for its background subagents,
+    *  whose work ended at its result, so its follow-up is a cycle. Output of
+    *  the work a cancel stopped starts nothing (see Session.cancelled). */
+   private startAutonomousCycle(sessionId: string, session: Session, message: SDKMessage): void {
+     if (this.foregroundWork.has(sessionId) || session.cancelled) return;
+-    if (message.type !== "assistant" && message.type !== "stream_event") return;
++    if (
++      message.type !== "assistant" &&
++      message.type !== "stream_event" &&
++      !(message.type === "user" && isTaskNotificationRecord(message))
++    )
++      return;
+     if (message.parent_tool_use_id !== null) return;
+     // A turn that Claude Code started is the foreground work already. Without
+     // lifecycle frames, a queued turn's output can come before its echo, so
+diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
+index 45bd4c2..89044c6 100644
+--- a/src/tests/acp-v2.test.ts
++++ b/src/tests/acp-v2.test.ts
+@@ -2382,6 +2382,88 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+     return client;
+   }
+ 
++  it("starts an autonomous cycle at its native input while assistant output is delayed", async () => {
++    const inputConsumed = Promise.withResolvers<void>();
++    const outputAllowed = Promise.withResolvers<void>();
++    scriptTurns(async function* (options) {
++      yield assistantText(options, "Started a background task.");
++      yield result(options);
++      yield idleState(options);
++      // Same structured origin as Claude Code's persisted task-notification
++      // input (also exercised by the native-history tests), without parsing text.
++      yield {
++        type: "user",
++        uuid: "autonomous-input",
++        session_id: options.sessionId,
++        parent_tool_use_id: null,
++        isReplay: true,
++        origin: { kind: "task-notification" },
++        message: { role: "user", content: "Background task completed." },
++      };
++      inputConsumed.resolve();
++      await outputAllowed.promise;
++      yield assistantText(options, "The task finished.", "msg_followup");
++      yield followupResult(options);
++      yield idleState(options);
++    });
++    const client = await promptAndWait(2, async (_agent, _sessionId, client) => {
++      await inputConsumed.promise;
++      try {
++        await vi.waitFor(() =>
++          expect(turnTrace(client.sessionUpdates)).toEqual([...endedTurn, "running"]),
++        );
++      } finally {
++        outputAllowed.resolve();
++      }
++    });
++    expect(turnTrace(client.sessionUpdates)).toEqual([
++      ...endedTurn,
++      "running",
++      "agent_message_chunk",
++      "idle end_turn",
++    ]);
++  });
++
++  it.each([
++    { parent: "toolu_child", origin: { kind: "task-notification" } },
++    { parent: null, origin: undefined },
++  ])(
++    "does not start foreground work for an unrelated user frame: %j",
++    async ({ parent, origin }) => {
++      const inputConsumed = Promise.withResolvers<void>();
++      const outputAllowed = Promise.withResolvers<void>();
++      scriptTurns(async function* (options) {
++        yield assistantText(options, "Started a background task.");
++        yield result(options);
++        yield idleState(options);
++        yield {
++          type: "user",
++          uuid: "unrelated-input",
++          session_id: options.sessionId,
++          parent_tool_use_id: parent,
++          isReplay: true,
++          origin,
++          message: { role: "user", content: "Background task completed." },
++        };
++        inputConsumed.resolve();
++        await outputAllowed.promise;
++        yield assistantText(options, "The task finished.", "msg_followup");
++        yield followupResult(options);
++        yield idleState(options);
++      });
++      await promptAndWait(2, async (_agent, _sessionId, client) => {
++        await inputConsumed.promise;
++        try {
++          expect(
++            turnTrace(client.sessionUpdates).filter((state) => state === "running"),
++          ).toHaveLength(1);
++        } finally {
++          outputAllowed.resolve();
++        }
++      });
++    },
++  );
++
+   it("reports a cycle after the turn ended as running, then idle with the cycle's usage", async () => {
+     scriptTurns(async function* (options) {
+       yield assistantText(options, "Started the build in the background.");
+-- 
+2.43.0
+
