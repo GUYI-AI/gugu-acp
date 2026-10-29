@@ -1,0 +1,180 @@
+From 14302db8683b8959c31a0915e0d3f5db0bcaf571 Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 18:59:30 -0700
+Subject: [PATCH 13/14] gugu: publish the transcript path Claude Code reports
+
+Why: a `claude` wrapper may set CLAUDE_CONFIG_DIR inside its own process.
+Claude Code then writes its session records under that directory, but neither
+this adapter nor the ACP client can see the variable, so a client that reads
+the records (history, message previews) looks under ~/.claude and finds
+nothing. The transcript path in hook input is the one place the CLI names the
+directory it actually uses. A UserPromptSubmit hook publishes it as
+`session_info_update._meta.claudeCode.transcriptPath`, again only when it
+changes (the first prompt, and after /clear starts a new transcript).
+UserPromptSubmit fires only once the client knows the session, unlike
+SessionStart, which can fire before session/new has returned.
+
+Upstream: none yet. The general capability (the agent reporting where it keeps
+a session's record) could be proposed upstream as a session_info_update field.
+
+Drop when: upstream reports the transcript path (or the configuration
+directory) to the client by itself.
+---
+ src/acp-agent.ts                  | 35 ++++++++++++
+ src/tests/transcript-path.test.ts | 91 +++++++++++++++++++++++++++++++
+ 2 files changed, 126 insertions(+)
+ create mode 100644 src/tests/transcript-path.test.ts
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 39e8a3f..891eb2b 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -11316,6 +11316,8 @@ export class ClaudeAcpAgent {
+     // launch" error from the SDK (see issue #749).
+     await this.validateCwd(params.cwd);
+     const clientPrompt = clientSystemPrompt(params.systemPrompt);
++    // The last transcript path published for this session (see the UserPromptSubmit hook).
++    let publishedTranscriptPath: string | undefined;
+ 
+     // We want to create a new session id unless it is resume,
+     // but not resume + forkSession.
+@@ -11723,6 +11725,39 @@ export class ClaudeAcpAgent {
+             ],
+           },
+         ],
++        // The transcript path in hook input is the only place the configuration
++        // directory the CLI actually uses shows: a `claude` wrapper may set
++        // CLAUDE_CONFIG_DIR inside its own process, out of sight of this adapter
++        // and of the client. Publish it as
++        // `session_info_update._meta.claudeCode.transcriptPath` whenever it
++        // changes (the first prompt, and after /clear starts a new transcript).
++        // This hook fires only once the session exists for the client.
++        UserPromptSubmit: [
++          ...(userProvidedOptions?.hooks?.UserPromptSubmit || []),
++          {
++            hooks: [
++              async (input) => {
++                const transcriptPath = input.transcript_path;
++                if (transcriptPath && transcriptPath !== publishedTranscriptPath) {
++                  publishedTranscriptPath = transcriptPath;
++                  void this.client
++                    .sessionUpdate({
++                      sessionId,
++                      // No `title` and no `updatedAt`: `null` would clear them.
++                      update: {
++                        sessionUpdate: "session_info_update",
++                        _meta: { claudeCode: { transcriptPath } },
++                      },
++                    })
++                    .catch((error) =>
++                      this.logger.error("Failed to publish the transcript path:", error),
++                    );
++                }
++                return { continue: true };
++              },
++            ],
++          },
++        ],
+         TaskCreated: [
+           ...(userProvidedOptions?.hooks?.TaskCreated || []),
+           {
+diff --git a/src/tests/transcript-path.test.ts b/src/tests/transcript-path.test.ts
+new file mode 100644
+index 0000000..d36250c
+--- /dev/null
++++ b/src/tests/transcript-path.test.ts
+@@ -0,0 +1,91 @@
++import { describe, it, expect, beforeEach, vi } from "vitest";
++import type { SessionNotification } from "@agentclientprotocol/sdk/unstable";
++import type { Options } from "@anthropic-ai/claude-agent-sdk";
++import type { AcpClient, ClaudeAcpAgent as ClaudeAcpAgentType } from "../acp-agent.js";
++
++let capturedOptions: Options | undefined;
++
++vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
++  const actual = await vi.importActual<typeof import("@anthropic-ai/claude-agent-sdk")>(
++    "@anthropic-ai/claude-agent-sdk",
++  );
++  const { makeMockQuery } = await import("./helpers.js");
++  return {
++    ...actual,
++    query: (args: { prompt: unknown; options: Options }) => {
++      capturedOptions = args.options;
++      return makeMockQuery({
++        initializationResult: async () => ({
++          models: [
++            { value: "claude-sonnet-4-6", displayName: "Claude Sonnet", description: "Fast" },
++          ],
++        }),
++      });
++    },
++  };
++});
++
++// A `claude` wrapper may set CLAUDE_CONFIG_DIR inside its own process: only the
++// transcript path the CLI reports in hook input names the directory it uses.
++describe("the transcript path Claude Code reports", () => {
++  let agent: ClaudeAcpAgentType;
++  let updates: SessionNotification[];
++
++  beforeEach(async () => {
++    capturedOptions = undefined;
++    updates = [];
++    vi.resetModules();
++    const { ClaudeAcpAgent } = await import("../acp-agent.js");
++    agent = new ClaudeAcpAgent({
++      sessionUpdate: async (notification: SessionNotification) => {
++        updates.push(notification);
++      },
++      requestPermission: async () => ({ outcome: { outcome: "cancelled" } }),
++      readTextFile: async () => ({ content: "" }),
++      writeTextFile: async () => ({}),
++    } as unknown as AcpClient);
++  });
++
++  async function submitPrompt(sessionId: string, transcriptPath: string) {
++    const callback = (capturedOptions!.hooks!.UserPromptSubmit!.at(-1) as any).hooks[0];
++    const out = await callback(
++      {
++        hook_event_name: "UserPromptSubmit",
++        session_id: sessionId,
++        transcript_path: transcriptPath,
++        cwd: process.cwd(),
++        prompt: "hi",
++      },
++      undefined,
++      { signal: new AbortController().signal },
++    );
++    expect(out).toEqual({ continue: true });
++  }
++
++  const published = () =>
++    updates
++      .filter((n) => n.update.sessionUpdate === "session_info_update")
++      .map(
++        (n) =>
++          (n.update._meta as { claudeCode?: { transcriptPath?: string } })?.claudeCode
++            ?.transcriptPath,
++      );
++
++  it("publishes it as session_info_update._meta.claudeCode.transcriptPath when it changes", async () => {
++    const { sessionId } = await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
++    await submitPrompt(sessionId, "/wrapped/config/projects/-work/a.jsonl");
++    await submitPrompt(sessionId, "/wrapped/config/projects/-work/a.jsonl");
++    await submitPrompt(sessionId, "/wrapped/config/projects/-work/b.jsonl");
++
++    await vi.waitFor(() =>
++      expect(published()).toEqual([
++        "/wrapped/config/projects/-work/a.jsonl",
++        "/wrapped/config/projects/-work/b.jsonl",
++      ]),
++    );
++    const update = updates.find((n) => n.update.sessionUpdate === "session_info_update")!;
++    expect(update.sessionId).toBe(sessionId);
++    expect(update.update).not.toHaveProperty("title");
++    expect(update.update).not.toHaveProperty("updatedAt");
++  });
++});
+-- 
+2.43.0
+

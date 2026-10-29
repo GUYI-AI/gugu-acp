@@ -1,0 +1,172 @@
+From d3afc4a3e1ce3627a75a890d466e17189c88986f Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 18:59:53 -0700
+Subject: [PATCH 14/14] gugu: the adapter's own lookups use the config dir
+ Claude Code reported
+
+Why: claudeConfigDir() read the adapter's own CLAUDE_CONFIG_DIR, else
+~/.claude. When a `claude` wrapper sets the variable inside the CLI's process,
+the adapter does not see it, so its session index (session/list), live registry
+(`<config>/sessions`), resume lookups (the resumed model and permission mode)
+and subagent history all looked in the wrong directory. The transcript path the
+CLI reports (previous patch) names the directory it really writes to:
+claudeConfigDir() now returns that directory once a prompt has reported it,
+ahead of the environment. Before the first report the adapter keeps the old
+answer, and file watchers that are already running keep the root they started
+with.
+
+Upstream: none yet; goes with the previous patch.
+
+Drop when: upstream learns the CLI's configuration directory from the CLI
+itself, or the CLI exposes it to SDK clients.
+---
+ src/acp-agent.ts                  |  6 ++++--
+ src/paths.ts                      | 29 +++++++++++++++++++++++++++--
+ src/tests/paths.test.ts           | 31 +++++++++++++++++++++++++++++++
+ src/tests/transcript-path.test.ts | 25 +++++++++++++++++++++++++
+ 4 files changed, 87 insertions(+), 4 deletions(-)
+ create mode 100644 src/tests/paths.test.ts
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 891eb2b..925463a 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -221,6 +221,7 @@ import {
+ } from "./permissions/presentation.js";
+ import { decodeClaudePermissionResponse } from "./permissions/response.js";
+ import { SettingsManager } from "./settings.js";
++import { noteTranscriptPath } from "./paths.js";
+ import {
+   activeUsageLimitMessage,
+   airSessionFailureCapabilityMeta,
+@@ -11728,8 +11729,8 @@ export class ClaudeAcpAgent {
+         // The transcript path in hook input is the only place the configuration
+         // directory the CLI actually uses shows: a `claude` wrapper may set
+         // CLAUDE_CONFIG_DIR inside its own process, out of sight of this adapter
+-        // and of the client. Publish it as
+-        // `session_info_update._meta.claudeCode.transcriptPath` whenever it
++        // and of the client. Learn it for this adapter's own lookups and publish
++        // it as `session_info_update._meta.claudeCode.transcriptPath` whenever it
+         // changes (the first prompt, and after /clear starts a new transcript).
+         // This hook fires only once the session exists for the client.
+         UserPromptSubmit: [
+@@ -11740,6 +11741,7 @@ export class ClaudeAcpAgent {
+                 const transcriptPath = input.transcript_path;
+                 if (transcriptPath && transcriptPath !== publishedTranscriptPath) {
+                   publishedTranscriptPath = transcriptPath;
++                  noteTranscriptPath(transcriptPath);
+                   void this.client
+                     .sessionUpdate({
+                       sessionId,
+diff --git a/src/paths.ts b/src/paths.ts
+index 1a5834e..1a2419c 100644
+--- a/src/paths.ts
++++ b/src/paths.ts
+@@ -1,7 +1,32 @@
+ import * as os from "node:os";
+ import * as path from "node:path";
+ 
+-/** The Claude configuration directory: `CLAUDE_CONFIG_DIR`, or `~/.claude`. */
++/** The directory Claude Code itself reported (see {@link noteTranscriptPath}). */
++let reportedConfigDir: string | undefined;
++
++/**
++ * The Claude configuration directory: the one Claude Code reported, else
++ * `CLAUDE_CONFIG_DIR`, else `~/.claude`. A `claude` wrapper may set
++ * `CLAUDE_CONFIG_DIR` inside its own process, out of this adapter's sight;
++ * what the CLI reports is where it actually writes.
++ */
+ export function claudeConfigDir(): string {
+-  return process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
++  return reportedConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude");
++}
++
++/**
++ * Learns the configuration directory from a transcript path the CLI reported
++ * in hook input: `<config>/projects/<encoded cwd>/<session id>.jsonl`. A path of
++ * another shape teaches nothing.
++ */
++export function noteTranscriptPath(transcriptPath: string): void {
++  if (!transcriptPath.endsWith(".jsonl")) return;
++  const projects = path.dirname(path.dirname(transcriptPath));
++  if (path.basename(projects) !== "projects") return;
++  reportedConfigDir = path.dirname(projects);
++}
++
++/** TEST-ONLY */
++export function resetReportedConfigDirForTests(): void {
++  reportedConfigDir = undefined;
+ }
+diff --git a/src/tests/paths.test.ts b/src/tests/paths.test.ts
+new file mode 100644
+index 0000000..7011f80
+--- /dev/null
++++ b/src/tests/paths.test.ts
+@@ -0,0 +1,31 @@
++import { afterEach, describe, expect, it } from "vitest";
++import * as os from "node:os";
++import * as path from "node:path";
++import { claudeConfigDir, noteTranscriptPath, resetReportedConfigDirForTests } from "../paths.js";
++
++describe("claudeConfigDir", () => {
++  const saved = process.env.CLAUDE_CONFIG_DIR;
++  afterEach(() => {
++    resetReportedConfigDirForTests();
++    if (saved === undefined) delete process.env.CLAUDE_CONFIG_DIR;
++    else process.env.CLAUDE_CONFIG_DIR = saved;
++  });
++
++  it("prefers the directory the CLI reported over the adapter's own environment", () => {
++    delete process.env.CLAUDE_CONFIG_DIR;
++    expect(claudeConfigDir()).toBe(path.join(os.homedir(), ".claude"));
++    process.env.CLAUDE_CONFIG_DIR = "/from/env";
++    expect(claudeConfigDir()).toBe("/from/env");
++
++    noteTranscriptPath(path.join("/wrapped/config", "projects", "-work-repo", "abc.jsonl"));
++    expect(claudeConfigDir()).toBe("/wrapped/config");
++  });
++
++  it("learns nothing from a path of another shape", () => {
++    process.env.CLAUDE_CONFIG_DIR = "/from/env";
++    noteTranscriptPath("/wrapped/config/elsewhere/-work/abc.jsonl");
++    noteTranscriptPath("/wrapped/config/projects/-work/abc.txt");
++    noteTranscriptPath("");
++    expect(claudeConfigDir()).toBe("/from/env");
++  });
++});
+diff --git a/src/tests/transcript-path.test.ts b/src/tests/transcript-path.test.ts
+index d36250c..1a15ca5 100644
+--- a/src/tests/transcript-path.test.ts
++++ b/src/tests/transcript-path.test.ts
+@@ -89,3 +89,28 @@ describe("the transcript path Claude Code reports", () => {
+     expect(update.update).not.toHaveProperty("updatedAt");
+   });
+ });
++
++describe("the adapter's own lookups", () => {
++  it("follow the configuration directory the CLI reported", async () => {
++    vi.resetModules();
++    const { ClaudeAcpAgent } = await import("../acp-agent.js");
++    const { claudeConfigDir } = await import("../paths.js");
++    const agent = new ClaudeAcpAgent({
++      sessionUpdate: async () => {},
++    } as unknown as AcpClient);
++    const { sessionId } = await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
++    const callback = (capturedOptions!.hooks!.UserPromptSubmit!.at(-1) as any).hooks[0];
++    await callback(
++      {
++        hook_event_name: "UserPromptSubmit",
++        session_id: sessionId,
++        transcript_path: "/wrapped/config/projects/-work/a.jsonl",
++        cwd: process.cwd(),
++        prompt: "hi",
++      },
++      undefined,
++      { signal: new AbortController().signal },
++    );
++    expect(claudeConfigDir()).toBe("/wrapped/config");
++  });
++});
+-- 
+2.43.0
+
