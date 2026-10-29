@@ -103,70 +103,15 @@
       "cli": "claude",
       "releases": [
         {
-          "version": "1.5.0",
-          "upstreamTag": "v0.94.1-preview.4",
-          "cliFrom": "2.1.307",
-          "verified": [
-            {
-              "cli": "2.1.307",
-              "at": "2026-10-22",
-              "how": "abc v2 (ThinkPad, build = patches on v0.94.1-preview.4, model through the CLI's own login; B ended 5.2 s into a 15 s background subagent)"
-            }
-          ]
-        },
-        {
-          "version": "1.5.1",
-          "upstreamTag": "v0.94.1-preview.4",
-          "cliFrom": "2.1.310",
-          "verified": [
-            {
-              "cli": "2.1.310",
-              "at": "2026-10-25",
-              "how": "abc (CI, upstream v0.94.1-preview.4)"
-            }
-          ]
-        },
-        {
-          "version": "1.5.2",
-          "upstreamTag": "v0.94.1-preview.4",
-          "cliFrom": "2.1.310",
-          "verified": [
-            {
-              "cli": "2.1.310",
-              "at": "2026-10-25",
-              "how": "abc (CI, upstream v0.94.1-preview.4)"
-            }
-          ]
-        },
-        {
-          "version": "1.6.0",
-          "upstreamTag": "v0.95.0",
-          "cliFrom": "2.1.310",
-          "verified": [
-            {
-              "cli": "2.1.310",
-              "at": "2026-10-25",
-              "how": "abc (CI, upstream v0.95.0)"
-            }
-          ]
-        },
-        {
-          "version": "1.6.1",
-          "upstreamTag": "v0.95.0",
-          "cliFrom": "2.1.312",
-          "verified": [
-            {
-              "cli": "2.1.312",
-              "at": "2026-10-29",
-              "how": "abc (CI, upstream v0.95.0)"
-            }
-          ]
-        },
-        {
           "version": "1.6.2",
           "upstreamTag": "v0.95.0",
-          "cliFrom": "2.1.312",
+          "cliFrom": "2.1.293",
           "verified": [
+            {
+              "cli": "2.1.293",
+              "at": "2026-10-29",
+              "how": "full abc (CI run 40960684835, real CLI and model service)"
+            },
             {
               "cli": "2.1.312",
               "at": "2026-10-29",
