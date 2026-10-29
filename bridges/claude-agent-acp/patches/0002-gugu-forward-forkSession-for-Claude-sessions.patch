@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From c617c36fb94b70e0a77bb7c9bb4c2cc869a2765b Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Wed, 9 Sep 2026 01:50:37 +0800
-Subject: [PATCH 02/10] gugu: forward forkSession for Claude sessions
+Subject: [PATCH 02/14] gugu: forward forkSession for Claude sessions
 
 Why: newSession() receives `_meta.claudeCode.options.forkSession` but drops
 it, so Gugu's runtime fork (resume + fork, nothing written to disk) silently
@@ -31,10 +31,10 @@ rebased on.
  3 files changed, 55 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 06a3355..d38f94e 100644
+index 81ce932..745e777 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -3010,9 +3010,10 @@ export class ClaudeAcpAgent {
+@@ -3045,9 +3045,10 @@ export class ClaudeAcpAgent {
  
    async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
      while (this.providerUpdate) await this.providerUpdate;
@@ -48,7 +48,7 @@ index 06a3355..d38f94e 100644
      this.afterSetupResponse(response.sessionId, params.mcpServers);
      return response;
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 3b10026..0c87fb0 100644
+index 9dca098..0ffca72 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
 @@ -387,6 +387,42 @@ describe("task plan lifecycle", () => {
@@ -95,10 +95,10 @@ index 3b10026..0c87fb0 100644
    let child: ReturnType<typeof spawn>;
  
 diff --git a/src/tests/create-session-options.test.ts b/src/tests/create-session-options.test.ts
-index 6c157c7..dd2f08a 100644
+index 627e181..24a2e45 100644
 --- a/src/tests/create-session-options.test.ts
 +++ b/src/tests/create-session-options.test.ts
-@@ -120,6 +120,22 @@ describe("createSession options merging", () => {
+@@ -122,6 +122,22 @@ describe("createSession options merging", () => {
      agent = new ClaudeAcpAgent(createMockClient());
    });
  
@@ -121,3 +121,6 @@ index 6c157c7..dd2f08a 100644
    for (const method of ["resumeSession", "loadSession"] as const) {
      for (const limit of ["maxTurns", "maxBudgetUsd"] as const) {
        it(`${method} applies added, tightened and removed ${limit} to the SDK query`, async () => {
+-- 
+2.43.0
+

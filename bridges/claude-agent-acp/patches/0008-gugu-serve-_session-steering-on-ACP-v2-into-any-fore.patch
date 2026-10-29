@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 52763e5fe254ff5e0ef2f01dac2d73d80adcef20 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:16:17 -0700
-Subject: [PATCH 08/10] gugu: serve _session/steering on ACP v2, into any
+Subject: [PATCH 08/14] gugu: serve _session/steering on ACP v2, into any
  foreground work
 
 Why: Gugu injects a message that arrives while the agent works (a group
@@ -76,10 +76,10 @@ Claude Code started on its own.
  44 files changed, 207 insertions(+), 74 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index b6956bd..d9a23eb 100644
+index cb00539..9d93a75 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -658,7 +658,7 @@ const TURN_NO_RESULT_MESSAGE =
+@@ -660,7 +660,7 @@ const TURN_NO_RESULT_MESSAGE =
   *  than queued as a separate `session/prompt`. Named `_session/steering` per the
   *  agreed ACP steering wire protocol; advertised to clients via the top-level
   *  `InitializeResponse._meta.steering.supported`. */
@@ -88,7 +88,7 @@ index b6956bd..d9a23eb 100644
  
  /** Stops one Claude background task without cancelling the parent prompt turn. */
  const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
-@@ -738,7 +738,7 @@ export type SteerResponse =
+@@ -740,7 +740,7 @@ export type SteerResponse =
  /** Validate raw JSON-RPC params into a {@link SteerRequest}. Kept minimal — the
   *  content blocks are handed to `promptToClaude`, which tolerates unknown block
   *  types — but `sessionId` and a non-empty `prompt` array are required. */
@@ -97,7 +97,7 @@ index b6956bd..d9a23eb 100644
    if (!params || typeof params !== "object") {
      throw RequestError.invalidParams(undefined, "steer params must be an object");
    }
-@@ -4314,7 +4314,10 @@ export class ClaudeAcpAgent {
+@@ -4350,7 +4350,10 @@ export class ClaudeAcpAgent {
      // and the active-path push below stay in one synchronous section so the
      // turn cannot settle in the gap between deciding to inject and enqueueing.
      const turnInFlight = (session.turnQueue ?? []).find((turn) => !turn.settled);
@@ -109,7 +109,7 @@ index b6956bd..d9a23eb 100644
        const promptRequest: PromptRequest = {
          sessionId,
          prompt: params.prompt,
-@@ -4359,16 +4362,20 @@ export class ClaudeAcpAgent {
+@@ -4395,16 +4398,20 @@ export class ClaudeAcpAgent {
      // check: the interrupt can have the CLI finalizing the aborted cycle by the
      // time the consumer next runs, and an unmarked result would settle the turn
      // (see Turn.steeredEchoes).
@@ -399,7 +399,7 @@ index f0446f9..eaa1432 100644
  {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
  {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
 diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl
-index ca0dced..d0b3a26 100644
+index 19d5d0f..7826041 100644
 --- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl
 +++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-agent-async.jsonl
 @@ -1,4 +1,4 @@
@@ -409,7 +409,7 @@ index ca0dced..d0b3a26 100644
  {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
  {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
 diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl
-index 5a99151..e606f34 100644
+index 226567f..73bc29f 100644
 --- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl
 +++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-late-child-update.jsonl
 @@ -1,4 +1,4 @@
@@ -419,7 +419,7 @@ index 5a99151..e606f34 100644
  {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
  {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
 diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl
-index 4a6d022..7942fee 100644
+index a548498..6cc1a3e 100644
 --- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl
 +++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-native-sessions.jsonl
 @@ -1,4 +1,4 @@
@@ -429,7 +429,7 @@ index 4a6d022..7942fee 100644
  {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
  {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
 diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl
-index 3b9951d..8be3560 100644
+index 7bf690d..88689b5 100644
 --- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl
 +++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-nested.jsonl
 @@ -1,4 +1,4 @@
@@ -439,7 +439,7 @@ index 3b9951d..8be3560 100644
  {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
  {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
 diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl
-index 5b72124..c2444e1 100644
+index c3aec65..8fe3f6b 100644
 --- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl
 +++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-task-legacy.jsonl
 @@ -1,4 +1,4 @@
@@ -449,7 +449,7 @@ index 5b72124..c2444e1 100644
  {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
  {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
 diff --git a/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl b/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl
-index 6f41208..0494f30 100644
+index 5f1efb4..1260123 100644
 --- a/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl
 +++ b/src/tests/acp-scenarios/__snapshots__/v2/subagent-transcript-extension.jsonl
 @@ -1,4 +1,4 @@
@@ -539,7 +539,7 @@ index 62a79b6..9cd1d93 100644
  {"kind":"notification","method":"session/update","payload":{"sessionId":"<session>","update":{"content":[{"text":"prompt 1","type":"text"}],"messageId":"<id-1>","sessionUpdate":"user_message"}}}
  {"kind":"response","method":"session/prompt","payload":{"messageId":"<id-1>"}}
 diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
-index ead5f08..38d32c2 100644
+index e5ec549..76e6e85 100644
 --- a/src/tests/acp-v2.test.ts
 +++ b/src/tests/acp-v2.test.ts
 @@ -307,8 +307,8 @@ describe("ACP protocol routing", () => {
@@ -553,7 +553,7 @@ index ead5f08..38d32c2 100644
      expect(response.authMethods?.length).toBeGreaterThan(0);
      for (const method of response.authMethods ?? []) {
        expect(method).not.toHaveProperty("id");
-@@ -5494,3 +5494,116 @@ describe("ACP v2 auth", () => {
+@@ -5487,3 +5487,116 @@ describe("ACP v2 auth", () => {
      });
    });
  });
@@ -762,3 +762,6 @@ index 2a91091..a094811 100644
    };
  }
  
+-- 
+2.43.0
+

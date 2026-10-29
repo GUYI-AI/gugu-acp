@@ -1,8 +1,8 @@
-From b1f1b67fb8f88e302278097d04bd003e21f89a03 Mon Sep 17 00:00:00 2001
+From 6c7327f4967f506732c294cec8f2f957af2fbda6 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 22 Oct 2026 12:29:43 -0700
-Subject: [PATCH] gugu: a file change keeps one path spelling from preview to
- result
+Subject: [PATCH 11/14] gugu: a file change keeps one path spelling from
+ preview to result
 
 Over ACP v2 the agent previews a file change from the tool input before the
 tool runs, and reports the change from the tool response after it. On

@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From c77c00b5e847f29833b7366eb1fa80fa9882f3f5 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 24 Sep 2026 15:34:32 +0800
-Subject: [PATCH 03/10] gugu: offer Claude's UltraCode as a session effort
+Subject: [PATCH 03/14] gugu: offer Claude's UltraCode as a session effort
 
 Why: UltraCode (xhigh effort plus standing dynamic-workflow orchestration) is
 a session flag in Claude Code (`ultracode` in flag settings), not an
@@ -33,18 +33,18 @@ extension point Gugu can use without patching).
  create mode 100644 src/tests/ultracode-effort.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index d38f94e..84f2bcb 100644
+index 745e777..6f34687 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -354,6 +354,7 @@ import {
-   effortFlagSettings,
+@@ -356,6 +356,7 @@ import {
+   effortLevelName,
    mergeEffortSettings,
    settingsEffortForModel,
 +  modelSupportsEffort,
  } from "./session-effort.js";
  
  export { EFFORT_CONFIG_ID, settingsEffortForModel } from "./session-effort.js";
-@@ -10630,9 +10631,7 @@ export class ClaudeAcpAgent {
+@@ -10844,9 +10845,7 @@ export class ClaudeAcpAgent {
            ? currentEffort
            : pinnedEffort);
        const effortPinnedForNewModel =
@@ -55,7 +55,7 @@ index d38f94e..84f2bcb 100644
        const seedEffort = effortPinnedForNewModel
          ? pinnedEffort
          : settingsEffortForModel(
-@@ -10680,14 +10679,15 @@ export class ClaudeAcpAgent {
+@@ -10894,14 +10893,15 @@ export class ClaudeAcpAgent {
          const newEffort =
            typeof newEffortOpt?.currentValue === "string" ? newEffortOpt.currentValue : undefined;
          try {
@@ -76,7 +76,7 @@ index d38f94e..84f2bcb 100644
                mergeEffortSettings(
                  session.settingsManager.getSettings(),
                  session.effortSettingsOverride,
-@@ -10760,9 +10760,13 @@ export class ClaudeAcpAgent {
+@@ -10974,9 +10974,13 @@ export class ClaudeAcpAgent {
      } else if (configId === EFFORT_CONFIG_ID) {
        // Apply first so a rejected control request cannot leave the displayed
        // value ahead of the SDK flag layer.
@@ -90,7 +90,7 @@ index d38f94e..84f2bcb 100644
            mergeEffortSettings(
              session.settingsManager.getSettings(),
              session.effortSettingsOverride,
-@@ -11676,7 +11680,9 @@ export class ClaudeAcpAgent {
+@@ -11916,7 +11920,9 @@ export class ClaudeAcpAgent {
        );
        const initialEffort = configOptions.find((option) => option.id === EFFORT_CONFIG_ID);
        if (useRecommendedValue && typeof initialEffort?.currentValue === "string") {
@@ -102,7 +102,7 @@ index d38f94e..84f2bcb 100644
        // Seed the context window without awaited IPC. The cached authoritative
        // window from a prior turn wins (`result.modelUsage`, cross-session),
 diff --git a/src/session-effort.ts b/src/session-effort.ts
-index cf9857f..69cbcd9 100644
+index 5fb4cee..ee192ee 100644
 --- a/src/session-effort.ts
 +++ b/src/session-effort.ts
 @@ -12,18 +12,37 @@ export function toSdkEffortLevel(value: string | undefined): EffortLevel | null
@@ -156,7 +156,7 @@ index cf9857f..69cbcd9 100644
    const modelSettings = settings.modelSettings;
    if (modelSettings) {
      for (const key of [modelInfo?.resolvedModel, modelInfo?.value, modelId]) {
-@@ -90,6 +110,7 @@ export function buildEffortConfigOption(
+@@ -97,6 +117,7 @@ export function buildEffortConfigOption(
      ? (currentModelInfo.supportedEffortLevels ?? [])
      : [];
    if (supportedLevels.length === 0) return undefined;
@@ -164,9 +164,9 @@ index cf9857f..69cbcd9 100644
  
    const recommendedEffort = (supportedLevels as string[]).includes("medium")
      ? "medium"
-@@ -103,9 +124,20 @@ export function buildEffortConfigOption(
-         .map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
-         .join(" "),
+@@ -107,9 +128,20 @@ export function buildEffortConfigOption(
+       value: level,
+       name: effortLevelName(level),
      })),
 +    ...(supportsUltracode
 +      ? [
@@ -333,3 +333,6 @@ index 0000000..ab47ade
 +    ).toBe(ULTRACODE_EFFORT_ID);
 +  });
 +});
+-- 
+2.43.0
+

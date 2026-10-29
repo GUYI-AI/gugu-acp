@@ -1,7 +1,7 @@
-From 1a1d96f1e3037746de3b18c3133320e042b7cfde Mon Sep 17 00:00:00 2001
+From c75315c001f1a522f21dc5a0908f7e3ce447eef4 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 22 Oct 2026 10:04:11 -0700
-Subject: [PATCH] gugu: a fork keeps the subagent history of its source
+Subject: [PATCH 10/14] gugu: a fork keeps the subagent history of its source
 
 The SDK fork copies only the session transcript, not the
 <session>/subagents folder beside it. On ACP v2 the replay of a session
@@ -44,7 +44,7 @@ index af0ae53..8c388fc 100644
    return { sessionId: forked.sessionId };
  }
 diff --git a/src/subagent-history.ts b/src/subagent-history.ts
-index 26fc00f..05c4bd2 100644
+index d807ab7..72df7d8 100644
 --- a/src/subagent-history.ts
 +++ b/src/subagent-history.ts
 @@ -4,7 +4,7 @@ import {
@@ -88,7 +88,7 @@ index 26fc00f..05c4bd2 100644
  function subagentsDirectory(transcript: string, sessionId: string): string {
    return path.join(path.dirname(transcript), sessionId, "subagents");
 diff --git a/src/tests/subagent-history.test.ts b/src/tests/subagent-history.test.ts
-index 3c7652f..b5690f1 100644
+index 11a617f..3adc53e 100644
 --- a/src/tests/subagent-history.test.ts
 +++ b/src/tests/subagent-history.test.ts
 @@ -1,9 +1,9 @@
@@ -103,7 +103,7 @@ index 3c7652f..b5690f1 100644
  
  const sessionId = "33333333-3333-4333-8333-333333333333";
  const base = {
-@@ -315,3 +315,49 @@ describe("stripForkPrefix", () => {
+@@ -316,3 +316,49 @@ describe("stripForkPrefix", () => {
      expect(stripForkPrefix(messages)).toBe(messages);
    });
  });
