@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From ec7206d629296b2c20fde0672483318c7fafa9d2 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:02:29 -0700
-Subject: [PATCH 05/10] gugu: a login that names no identity is not "logged
+Subject: [PATCH 05/14] gugu: a login that names no identity is not "logged
  out"
 
 Why: `claude auth status --json` for a bearer token, `ANTHROPIC_AUTH_TOKEN`
@@ -30,10 +30,10 @@ key source to `none`.
  3 files changed, 29 insertions(+), 5 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index fa46756..4e07d20 100644
+index 693ef52..42387c6 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -3424,7 +3424,7 @@ export class ClaudeAcpAgent {
+@@ -3459,7 +3459,7 @@ export class ClaudeAcpAgent {
        }
      }
      if (!status) {
@@ -124,3 +124,6 @@ index 2265a21..aa9758f 100644
    it("advertises the extension in agentCapabilities._meta", async () => {
      const response = await agent.initialize({ protocolVersion: 1, clientCapabilities: {} });
      // Presence is the whole advertisement — "this agent pushes its identity".
+-- 
+2.43.0
+

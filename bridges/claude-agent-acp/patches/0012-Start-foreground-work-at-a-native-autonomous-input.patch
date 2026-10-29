@@ -1,7 +1,8 @@
-From 0ced5398a6c251b4ea39bc131fc1bb23ffe155f4 Mon Sep 17 00:00:00 2001
+From fbc5e00c2f2d4363d6747e9f852c13d992a285f3 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 02:38:13 +0000
-Subject: [PATCH] Start autonomous foreground work at the CLI request boundary
+Subject: [PATCH 12/14] Start autonomous foreground work at the CLI request
+ boundary
 
 Why: Claude Code persists task-notification input without emitting it as a live SDK user frame. After a valid task notification, its next init or requesting frame starts foreground work before assistant output. Keep task completion alone idle and retain the existing foreground lifecycle.
 
@@ -14,10 +15,10 @@ Drop when: upstream starts autonomous foreground work at the native request boun
  2 files changed, 194 insertions(+), 12 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 3eac5e7..dd1d80f 100644
+index 28d98d8..39e8a3f 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -1473,6 +1473,8 @@ export type Session = {
+@@ -1492,6 +1492,8 @@ export type Session = {
     *  yields none, and a pre-counted debt that never drains would mask one
     *  future issue-#825 detection. */
    lastSessionState?: "idle" | "running" | "requires_action";
@@ -26,7 +27,7 @@ index 3eac5e7..dd1d80f 100644
    /** How many trailing `session_state_changed: idle` messages are already
     *  accounted for: every result is followed by one (user-turn results that
     *  terminate a turn — settle, reject, or orphan skip — and autonomous
-@@ -6533,6 +6535,9 @@ export class ClaudeAcpAgent {
+@@ -6611,6 +6613,9 @@ export class ClaudeAcpAgent {
                  // resumed it, and the end of an earlier delegation ends
                  // nothing: the child and its live task belong to the new run.
                  if (subagents.isStaleEnd(message.task_id, message.tool_use_id)) break;
@@ -36,7 +37,7 @@ index 3eac5e7..dd1d80f 100644
                  // The task settled — no further tool calls can originate
                  // from it, so its registry entry can be dropped.
                  await subagents.finishTask(
-@@ -9778,15 +9783,20 @@ export class ClaudeAcpAgent {
+@@ -9909,15 +9914,20 @@ export class ClaudeAcpAgent {
    }
  
    /** Start a model cycle that Claude Code started on its own as the foreground
@@ -62,7 +63,7 @@ index 3eac5e7..dd1d80f 100644
      // A turn that Claude Code started is the foreground work already. Without
      // lifecycle frames, a queued turn's output can come before its echo, so
      // output while a turn is queued may be that turn's. With them, a turn that
-@@ -9794,7 +9804,9 @@ export class ClaudeAcpAgent {
+@@ -9925,7 +9935,9 @@ export class ClaudeAcpAgent {
      const queued = (session.turnQueue ?? []).some(
        (turn) => !turn.settled && turn !== session.activeTurn,
      );
@@ -73,7 +74,7 @@ index 3eac5e7..dd1d80f 100644
      this.startForeground(sessionId, AUTONOMOUS_CYCLE);
    }
  
-@@ -9810,11 +9822,12 @@ export class ClaudeAcpAgent {
+@@ -9941,11 +9953,12 @@ export class ClaudeAcpAgent {
        : !session.activeTurn && !this.runsAutonomousCycle(sessionId);
    }
  
@@ -91,10 +92,10 @@ index 3eac5e7..dd1d80f 100644
  
    /**
 diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
-index 45bd4c2..8ad1e4b 100644
+index dc07bab..ec15950 100644
 --- a/src/tests/acp-v2.test.ts
 +++ b/src/tests/acp-v2.test.ts
-@@ -2382,6 +2382,171 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+@@ -2377,6 +2377,171 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
      return client;
    }
  
@@ -266,7 +267,7 @@ index 45bd4c2..8ad1e4b 100644
    it("reports a cycle after the turn ended as running, then idle with the cycle's usage", async () => {
      scriptTurns(async function* (options) {
        yield assistantText(options, "Started the build in the background.");
-@@ -3733,8 +3898,10 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+@@ -3726,8 +3891,10 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
        yield followupResult(options);
        yield idleState(options);
      });
@@ -279,7 +280,7 @@ index 45bd4c2..8ad1e4b 100644
        await vi.waitFor(() =>
          expect(agents[0].sessions[sessionId]?.modelRequestSinceResult).toBe(true),
        );
-@@ -3744,6 +3911,8 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+@@ -3737,6 +3904,8 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
      expect(turnTrace(client.sessionUpdates)).toEqual([
        ...endedTurn,
        "running",

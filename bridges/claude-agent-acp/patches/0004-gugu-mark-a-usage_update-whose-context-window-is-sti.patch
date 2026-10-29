@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From 3b892cdf7f6e1ee4e7348820dc5fb12c341d6db2 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Thu, 1 Oct 2026 04:52:59 +0800
-Subject: [PATCH 04/10] gugu: mark a usage_update whose context window is still
+Subject: [PATCH 04/14] gugu: mark a usage_update whose context window is still
  a guess
 
 Why: a session's `size` is the name-based guess until the window is
@@ -28,10 +28,10 @@ Drop when: upstream reports on usage_update whether `size` is confirmed.
  2 files changed, 97 insertions(+), 4 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 84f2bcb..fa46756 100644
+index 6f34687..693ef52 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -4720,7 +4720,10 @@ export class ClaudeAcpAgent {
+@@ -4773,7 +4773,10 @@ export class ClaudeAcpAgent {
      };
  
      // ACP's usage_update has no model field, so the model the usage belongs
@@ -43,7 +43,7 @@ index 84f2bcb..fa46756 100644
      const attachUsageModel = <
        T extends {
          sessionUpdate: "usage_update";
-@@ -4731,12 +4734,14 @@ export class ClaudeAcpAgent {
+@@ -4784,12 +4787,14 @@ export class ClaudeAcpAgent {
      >(
        update: T,
      ): T => {
@@ -61,10 +61,10 @@ index 84f2bcb..fa46756 100644
        };
      };
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 0c87fb0..e825d9b 100644
+index 0ffca72..16024dd 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -14244,6 +14244,89 @@ describe("usage_update computation", () => {
+@@ -14458,6 +14458,89 @@ describe("usage_update computation", () => {
      expect(usageUpdates[1].update.cost).toBeDefined();
    });
  
@@ -154,7 +154,7 @@ index 0c87fb0..e825d9b 100644
    it("includes the effective model id on usage_update notifications", async () => {
      const { agent, updates } = createMockAgentWithCapture();
      injectSession(agent, [
-@@ -17690,9 +17773,11 @@ describe("result origin handling", () => {
+@@ -17904,9 +17987,11 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();
@@ -166,7 +166,7 @@ index 0c87fb0..e825d9b 100644
      });
    });
  
-@@ -17708,7 +17793,10 @@ describe("result origin handling", () => {
+@@ -17922,7 +18007,10 @@ describe("result origin handling", () => {
  
      const usageUpdate = updates.find((u: any) => u.update?.sessionUpdate === "usage_update");
      expect(usageUpdate).toBeDefined();
@@ -178,3 +178,6 @@ index 0c87fb0..e825d9b 100644
    });
  
    it("task-notification result with max_tokens does not override the user-turn stopReason", async () => {
+-- 
+2.43.0
+

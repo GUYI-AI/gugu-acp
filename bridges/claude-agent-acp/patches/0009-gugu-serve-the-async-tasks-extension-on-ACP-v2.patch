@@ -1,7 +1,7 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From ed56af33b6624c0554695d5440e99b083ffa5a2c Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:16:48 -0700
-Subject: [PATCH 09/10] gugu: serve the async tasks extension on ACP v2
+Subject: [PATCH 09/14] gugu: serve the async tasks extension on ACP v2
 
 Why: Gugu lists a session's background commands and stops one on its own
 (`_session/async_task/stop`), without stopping the turn. That lifecycle is the
@@ -33,10 +33,10 @@ Drop when: upstream offers background task control on v2.
  6 files changed, 103 insertions(+), 13 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index d9a23eb..3eac5e7 100644
+index 9d93a75..28d98d8 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -661,18 +661,18 @@ const TURN_NO_RESULT_MESSAGE =
+@@ -663,18 +663,18 @@ const TURN_NO_RESULT_MESSAGE =
  export const STEER_METHOD = "_session/steering";
  
  /** Stops one Claude background task without cancelling the parent prompt turn. */
@@ -59,7 +59,7 @@ index d9a23eb..3eac5e7 100644
    if (!value || typeof value !== "object" || Array.isArray(value)) {
      throw RequestError.invalidParams(undefined, "async task stop params must be an object");
    }
-@@ -4530,7 +4530,7 @@ export class ClaudeAcpAgent {
+@@ -4583,7 +4583,7 @@ export class ClaudeAcpAgent {
       *  update, so only the first becomes one. */
      const noticedToolUses = new Set<string>();
      const asyncTasks = (session.asyncTaskRuntime ??= new AsyncTaskRuntime(
@@ -68,7 +68,7 @@ index d9a23eb..3eac5e7 100644
        params.sessionId,
        async (notification) => this.client.sessionUpdate(asSdkSessionNotification(notification)),
        {
-@@ -5960,7 +5960,9 @@ export class ClaudeAcpAgent {
+@@ -6038,7 +6038,9 @@ export class ClaudeAcpAgent {
          // From CLI 2.1.270 the state stays `running` while background agents
          // run, so a turn that their notification starts has no `running`
          // transition. Its first output with no prompt open starts its task.
@@ -78,7 +78,7 @@ index d9a23eb..3eac5e7 100644
            asyncTasks.enabled &&
            !asyncTasks.autonomousTurnOpen &&
            (message.type === "assistant" || message.type === "stream_event") &&
-@@ -6124,6 +6126,7 @@ export class ClaudeAcpAgent {
+@@ -6202,6 +6204,7 @@ export class ClaudeAcpAgent {
                  // its own, for example for a task notification. The client
                  // sees it as an async task (see autonomousTurnStarted).
                  if (
@@ -86,7 +86,7 @@ index d9a23eb..3eac5e7 100644
                    asyncTasks.enabled &&
                    message.state === "running" &&
                    previousState !== "running" &&
-@@ -9344,7 +9347,7 @@ export class ClaudeAcpAgent {
+@@ -9474,7 +9477,7 @@ export class ClaudeAcpAgent {
      // comes later and needs the tool use that started the task.
      const replayToolUses = new Map<string, { name: string; input: unknown; sessionId: string }>();
      const replayAsyncTasks = new AsyncTaskRuntime(
@@ -95,7 +95,7 @@ index d9a23eb..3eac5e7 100644
        sessionId,
        async (notification) => this.client.sessionUpdate(asSdkSessionNotification(notification)),
        {
-@@ -11794,7 +11797,7 @@ export class ClaudeAcpAgent {
+@@ -12034,7 +12037,7 @@ export class ClaudeAcpAgent {
          liveBackgroundTasks: new Map(),
          stopsWorkflowsOnCancel:
            options.perTaskStopAffordance === true &&
@@ -105,7 +105,7 @@ index d9a23eb..3eac5e7 100644
          nativeSubagentTaskIdByToolUseId: new Map(),
          nativeSubagentParentByToolUseId: new Map(),
 diff --git a/src/async-tasks.ts b/src/async-tasks.ts
-index fb859f6..9ad8467 100644
+index 3c390dc..93378f4 100644
 --- a/src/async-tasks.ts
 +++ b/src/async-tasks.ts
 @@ -109,8 +109,21 @@ type BackgroundTaskLevel = TaskIdentity & {
@@ -133,10 +133,10 @@ index fb859f6..9ad8467 100644
  
  /** Publishes Claude's non-agent background work as a separate AIR task lifecycle. */
 diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
-index 38d32c2..45bd4c2 100644
+index 76e6e85..dc07bab 100644
 --- a/src/tests/acp-v2.test.ts
 +++ b/src/tests/acp-v2.test.ts
-@@ -5606,4 +5606,55 @@ describe("ACP v2 extensions", () => {
+@@ -5599,4 +5599,55 @@ describe("ACP v2 extensions", () => {
        "idle end_turn",
      ]);
    });
@@ -268,3 +268,6 @@ index 6de793f..c2eef4e 100644
      case "current_mode_update":
        // v2 has no modes: the mode is the `mode` config option. Every mode
        // change also reaches the client as a `config_option_update` or in the
+-- 
+2.43.0
+
