@@ -1,0 +1,398 @@
+From 0d9c1b1cf3daac10bdd029d35d48a7b7ce0a149a Mon Sep 17 00:00:00 2001
+From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 05:07:52 +0800
+Subject: [PATCH] gugu: forward native blocking Stop hook notices
+
+Why: decision/reason-only Stop command hooks resume the model without an informational frame. Enable native lifecycle events and forward successful blocking responses through ACP notices, including autonomous cycles without a prompted Turn. Keep native systemMessage output on its existing lane, ignore terminal continue:false, and never infer hooks from assistant prose.
+
+Upstream: none yet.
+
+Drop when: upstream enables and forwards blocking Stop responses through ACP notices.
+---
+ src/acp-agent.ts                   |  30 +++-
+ src/stop-hook-notices.ts           |  34 +++++
+ src/tests/acp-v2.test.ts           |  34 +++++
+ src/tests/stop-hook-notice.test.ts | 214 +++++++++++++++++++++++++++++
+ 4 files changed, 311 insertions(+), 1 deletion(-)
+ create mode 100644 src/stop-hook-notices.ts
+ create mode 100644 src/tests/stop-hook-notice.test.ts
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 925463a..93d6a72 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -222,6 +222,7 @@ import {
+ import { decodeClaudePermissionResponse } from "./permissions/response.js";
+ import { SettingsManager } from "./settings.js";
+ import { noteTranscriptPath } from "./paths.js";
++import { blockingStopNotice } from "./stop-hook-notices.js";
+ import {
+   activeUsageLimitMessage,
+   airSessionFailureCapabilityMeta,
+@@ -813,6 +814,8 @@ type Turn = {
+    *  queue head, not `activeTurn`: a UserPromptSubmit block arrives before
+    *  any echo, so the turn is only promoted when its result lands. */
+   noticeTexts?: string[];
++  /** Native Stop responses already presented during this turn. */
++  stopHookIds?: Set<string>;
+   /** Structured presentation for an exact /usage or /mcp command. The command
+    * still runs through the normal SDK turn so ordering, cancellation,
+    * persistence, and replay remain unchanged. A null result means the request
+@@ -1035,6 +1038,8 @@ export type Session = {
+   /** The turn whose messages the consumer is currently attributing output to
+    *  (the head of `turnQueue` once its user message has been echoed). */
+   activeTurn?: Turn | null;
++  /** Native Stop responses outside a prompted turn, including autonomous cycles. */
++  stopHookIds?: Set<string>;
+   /** Session-owned native checkpoint reporter. Turn state stays on each Turn. */
+   fileChangeReporter?: NativeFileChangeReporter;
+   /** Optimistic goal state published for a submitted `/goal` command whose
+@@ -6533,9 +6538,29 @@ export class ClaudeAcpAgent {
+               }
+               case "hook_started":
+               case "hook_progress":
+-              case "hook_response":
+               case "files_persisted":
+                 break;
++              case "hook_response": {
++                const content = blockingStopNotice(message);
++                const owner = session.activeTurn ?? session;
++                if (!content || session.cancelled || owner.stopHookIds?.has(message.hook_id)) {
++                  break;
++                }
++                (owner.stopHookIds ??= new Set()).add(message.hook_id);
++                await sendUpdate({
++                  sessionId: params.sessionId,
++                  update: noticeOrTranscriptUpdate(
++                    {
++                      severity: "info",
++                      ...splitNoticeText(content, "Stop says: Completion blocked"),
++                    },
++                    supportsNotices,
++                    `**Notice:** ${content}`,
++                    { claudeCode: { kind: "informational", level: "notice" } },
++                  ),
++                });
++                break;
++              }
+               case "task_progress":
+                 if (isLateTaskRun(session, message.task_id, message.run_id)) {
+                   this.logger.log(
+@@ -11576,6 +11601,9 @@ export class ClaudeAcpAgent {
+       // Before `userProvidedOptions`, so a client that passes
+       // `promptSuggestions: false` keeps it off.
+       promptSuggestions: true,
++      // Command Stop hooks can block with only decision/reason, without an
++      // informational frame. Their native response carries that boundary.
++      includeHookEvents: true,
+       ...userProvidedOptions,
+       // Claude Code uses the same checkpoint store for /rewind. Enable it only
+       // for clients that negotiated per-turn file-change reports; this avoids
+diff --git a/src/stop-hook-notices.ts b/src/stop-hook-notices.ts
+new file mode 100644
+index 0000000..6739dc2
+--- /dev/null
++++ b/src/stop-hook-notices.ts
+@@ -0,0 +1,34 @@
++import type { SDKHookResponseMessage } from "@anthropic-ai/claude-agent-sdk";
++
++/** Only the CLI's completed command-hook response can establish a Stop block. */
++export function blockingStopNotice(message: SDKHookResponseMessage): string | null {
++  if (message.hook_event !== "Stop" || message.outcome !== "success" || message.exit_code !== 0) {
++    return null;
++  }
++  let output: {
++    decision?: unknown;
++    reason?: unknown;
++    systemMessage?: unknown;
++    continue?: unknown;
++  } | null;
++  try {
++    output = JSON.parse(message.stdout);
++  } catch {
++    return null;
++  }
++  if (
++    output?.decision !== "block" ||
++    output.continue === false ||
++    typeof output.reason !== "string" ||
++    !output.reason.trim() ||
++    // Claude Code already sends this on its informational lane.
++    (typeof output.systemMessage === "string" && output.systemMessage.length > 0)
++  ) {
++    return null;
++  }
++  return output.reason
++    .trim()
++    .split(/\r?\n/)
++    .map((line) => (line.trim() ? `Stop says: ${line}` : ""))
++    .join("\n");
++}
+diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
+index ec15950..3266088 100644
+--- a/src/tests/acp-v2.test.ts
++++ b/src/tests/acp-v2.test.ts
+@@ -2390,6 +2390,40 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+     uuid: randomUUID(), session_id: options.sessionId,
+   });
+ 
++  it("reports a blocking Stop once in an autonomous cycle without a prompted turn", async () => {
++    scriptTurns(async function* (options) {
++      yield assistantText(options, "Started a background task.");
++      yield result(options);
++      yield idleState(options);
++      yield completedTask(options);
++      yield requestBoundary(options, "init");
++      yield assistantText(options, "The task finished.", "msg_before_stop");
++      const hook = {
++        type: "system",
++        subtype: "hook_response",
++        hook_event: "Stop",
++        hook_name: "Stop",
++        hook_id: "autonomous-stop",
++        stdout: '{"decision":"block","reason":"Verify the task."}',
++        output: '{"decision":"block","reason":"Verify the task."}',
++        stderr: "",
++        exit_code: 0,
++        outcome: "success",
++        uuid: randomUUID(),
++        session_id: options.sessionId,
++      };
++      yield hook;
++      yield hook;
++      yield assistantText(options, "Verified.", "msg_after_stop");
++      yield followupResult(options);
++      yield idleState(options);
++    });
++    const client = await promptAndWait(2);
++    expect(client.updates("notice")).toEqual([
++      { sessionUpdate: "notice", severity: "info", title: "Stop says: Verify the task." },
++    ]);
++  });
++
+   it.each(["init", "requesting"])("starts at the CLI %s boundary before autonomous output", async (boundary) => {
+     const notificationConsumed = Promise.withResolvers<void>();
+     const requestAllowed = Promise.withResolvers<void>();
+diff --git a/src/tests/stop-hook-notice.test.ts b/src/tests/stop-hook-notice.test.ts
+new file mode 100644
+index 0000000..b86ab87
+--- /dev/null
++++ b/src/tests/stop-hook-notice.test.ts
+@@ -0,0 +1,214 @@
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++import type { Options } from "@anthropic-ai/claude-agent-sdk";
++import { ClaudeAcpAgent, type AcpClient } from "../acp-agent.js";
++import { Pushable } from "../utils.js";
++import { initializeClient } from "./helpers.js";
++import {
++  mockSessionState,
++  successfulResultMessage,
++  userEcho,
++  wrapQuery,
++} from "./session-doubles.js";
++
++let capturedOptions: Options | undefined;
++vi.mock("@anthropic-ai/claude-agent-sdk", async () => {
++  const actual = await vi.importActual<typeof import("@anthropic-ai/claude-agent-sdk")>(
++    "@anthropic-ai/claude-agent-sdk",
++  );
++  const { makeMockQuery } = await import("./helpers.js");
++  return {
++    ...actual,
++    query: (args: { options: Options }) => {
++      capturedOptions = args.options;
++      return makeMockQuery();
++    },
++  };
++});
++
++// Captured from command Stop hooks on CLI 2.1.293 and 2.1.312. The
++// decision/reason JSON is on stdout; no informational frame accompanies it.
++const response = (output: unknown, overrides: Record<string, unknown> = {}) => ({
++  type: "system",
++  subtype: "hook_response",
++  hook_id: "stop-1",
++  hook_name: "Stop",
++  hook_event: "Stop",
++  stdout: JSON.stringify(output) + "\n",
++  output: JSON.stringify(output) + "\n",
++  stderr: "",
++  exit_code: 0,
++  outcome: "success",
++  uuid: "response-1",
++  session_id: "test-session",
++  ...overrides,
++});
++const blocked = { decision: "block", reason: "Check the result.\nThen continue." };
++const answer = (text: string) => ({
++  type: "assistant",
++  uuid: text,
++  parent_tool_use_id: null,
++  session_id: "test-session",
++  message: {
++    id: text,
++    role: "assistant",
++    model: "claude-sonnet-4-6",
++    content: [{ type: "text", text }],
++    usage: {
++      input_tokens: 0,
++      output_tokens: 0,
++      cache_read_input_tokens: 0,
++      cache_creation_input_tokens: 0,
++    },
++  },
++});
++
++describe("native blocking Stop notices", () => {
++  let agent: ClaudeAcpAgent;
++  let updates: any[];
++  beforeEach(() => {
++    capturedOptions = undefined;
++    updates = [];
++    agent = new ClaudeAcpAgent(
++      {
++        sessionUpdate: async (n: unknown) => {
++          updates.push(n);
++        },
++      } as AcpClient,
++      { log: () => {}, error: () => {} },
++    );
++  });
++  afterEach(async () => {
++    await agent.dispose();
++  });
++
++  async function consume(messages: any[], notices = true, cancelled = false) {
++    await initializeClient(agent, notices ? { session: { notices: {} } } : {});
++    const input = new Pushable<any>();
++    async function* stream() {
++      const { value } = await input[Symbol.asyncIterator]().next();
++      yield userEcho(value);
++      if (cancelled) agent.sessions["test-session"].cancelled = true;
++      yield* messages;
++      yield successfulResultMessage();
++      yield { type: "system", subtype: "session_state_changed", state: "idle" };
++    }
++    agent.sessions["test-session"] = mockSessionState({ input, query: wrapQuery(stream()) });
++    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "continue" }] });
++    return updates.map((n) => n.update);
++  }
++
++  it("enables native lifecycle frames for ordinary sessions", async () => {
++    await agent.newSession({ cwd: process.cwd(), mcpServers: [] });
++    expect(capturedOptions?.includeHookEvents).toBe(true);
++  });
++
++  it("publishes one notice between the completed answer and its continuation", async () => {
++    const out = await consume([answer("Before Stop."), response(blocked), answer("After Stop.")]);
++    const visible = out.filter(
++      (u) => u.sessionUpdate === "notice" || u.sessionUpdate === "agent_message_chunk",
++    );
++    expect(visible).toEqual([
++      expect.objectContaining({
++        sessionUpdate: "agent_message_chunk",
++        content: expect.objectContaining({ text: "Before Stop." }),
++      }),
++      {
++        sessionUpdate: "notice",
++        severity: "info",
++        title: "Stop says: Check the result.",
++        description: "Stop says: Then continue.",
++      },
++      expect.objectContaining({
++        sessionUpdate: "agent_message_chunk",
++        content: expect.objectContaining({ text: "After Stop." }),
++      }),
++    ]);
++  });
++
++  it("marks the legacy transcript fallback as a provider notice", async () => {
++    const out = await consume([response(blocked)], false);
++    expect(out).toContainEqual({
++      sessionUpdate: "agent_message_chunk",
++      content: {
++        type: "text",
++        text: "**Notice:** Stop says: Check the result.\nStop says: Then continue.",
++      },
++      _meta: { claudeCode: { kind: "informational", level: "notice" } },
++    });
++  });
++
++  it("does not duplicate the CLI's systemMessage notice", async () => {
++    const out = await consume([
++      response({ ...blocked, systemMessage: "Visible message" }),
++      {
++        type: "system",
++        subtype: "informational",
++        content: "Stop says: Visible message",
++        level: "notice",
++        session_id: "test-session",
++      },
++    ]);
++    expect(out.filter((u) => u.sessionUpdate === "notice")).toEqual([
++      { sessionUpdate: "notice", severity: "info", title: "Stop says: Visible message" },
++    ]);
++  });
++
++  it("still reports a block when systemMessage is empty", async () => {
++    const out = await consume([response({ ...blocked, systemMessage: "" })]);
++    expect(out.filter((u) => u.sessionUpdate === "notice")).toHaveLength(1);
++  });
++
++  it("leaves a whitespace systemMessage to the CLI's informational lane", async () => {
++    const out = await consume([
++      response({ ...blocked, systemMessage: "   " }),
++      {
++        type: "system",
++        subtype: "informational",
++        content: "Stop says:    ",
++        level: "notice",
++        session_id: "test-session",
++      },
++    ]);
++    expect(out.filter((u) => u.sessionUpdate === "notice")).toHaveLength(1);
++  });
++
++  it("keeps long multiline reasons on the Stop notice lane", async () => {
++    const reason = "x".repeat(300) + "\n\nReview the answer.";
++    const out = await consume([response({ decision: "block", reason })]);
++    expect(out).toContainEqual({
++      sessionUpdate: "notice",
++      severity: "info",
++      title: "Stop says: Completion blocked",
++      description: `Stop says: ${"x".repeat(300)}\n\nStop says: Review the answer.`,
++    });
++  });
++
++  it("drops late hook responses after cancellation", async () => {
++    const out = await consume([response(blocked)], true, true);
++    expect(out.filter((u) => u.sessionUpdate === "notice")).toEqual([]);
++  });
++
++  it("deduplicates the same native hook id, but keeps later distinct blocks", async () => {
++    const out = await consume([
++      response(blocked),
++      response(blocked),
++      response(blocked, { hook_id: "stop-2" }),
++    ]);
++    expect(out.filter((u) => u.sessionUpdate === "notice")).toHaveLength(2);
++  });
++
++  it.each([
++    response(blocked, { hook_event: "PreToolUse" }),
++    response(blocked, { outcome: "cancelled" }),
++    response(blocked, { exit_code: 1, outcome: "error" }),
++    response({ decision: "approve", reason: "not blocking" }),
++    response({ ...blocked, continue: false }),
++    response({ decision: "block", reason: 123 }),
++    response({ decision: "block", reason: "  " }),
++    response(blocked, { stdout: "not JSON" }),
++    answer("A Stop hook says: block. This is only ordinary assistant prose."),
++  ])("does not invent a Stop boundary from unrelated output %#", async (frame) => {
++    const out = await consume([frame]);
++    expect(out.filter((u) => u.sessionUpdate === "notice")).toEqual([]);
++  });
++});
+-- 
+2.44.0
+
