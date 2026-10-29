@@ -1,49 +1,62 @@
-name: follow
-# Unattended: follow upstream releases and new CLI versions (scripts/follow.mjs).
-# A new upstream tag -> patches + build + tests + ABC -> publish + compat add-release.
-# A new CLI version  -> ABC against our newest release -> compat record-verified.
-# Failures open (or comment on) an issue; nothing is published or recorded before every check passed.
+name: Stop hook 990 old-CLI ABC
 on:
-  schedule:
-    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Run every check but do not publish, commit or push'
+        description: 'Compatibility verification only; publishing is never enabled here'
         type: boolean
-        default: false
+        default: true
 permissions:
-  contents: write
-  issues: write
-  id-token: write   # npm provenance: some upstreams (pi-acp) set publishConfig.provenance
+  contents: read
 concurrency:
-  group: follow
+  group: stop-hook-990-abc
   cancel-in-progress: false
 jobs:
-  follow:
+  abc:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        bridge: [claude-agent-acp, pi-acp]
+    timeout-minutes: 25
     env:
-      # git am --3way may need a committer for its synthetic merge base.
       GIT_COMMITTER_NAME: gugu-acp bot
       GIT_COMMITTER_EMAIL: gugu-acp@users.noreply.github.com
-      GH_TOKEN: ${{ github.token }}
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      # Only abc.mjs hands these to the CLI (as ANTHROPIC_*); builds and upstream tests never see them.
-      ABC_ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
-      ABC_ANTHROPIC_AUTH_TOKEN: ${{ secrets.ABC_ANTHROPIC_AUTH_TOKEN }}
-      ABC_ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # publish-compat.mjs counts compat.json commits for its version
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - if: matrix.bridge == 'claude-agent-acp'
-        run: node --test scripts/abc-order.test.mjs
-      - run: node scripts/follow.mjs ${{ matrix.bridge }} ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Build the merged source and install isolated bridge and CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          node scripts/build.mjs claude-agent-acp > build.log 2>&1 || { tail -n 100 build.log; exit 1; }
+          GUGU_ABC_TARBALL="$(tail -n 1 build.log)"
+          test -f "$GUGU_ABC_TARBALL"
+          npm install --prefix "$RUNNER_TEMP/bridge-990" --omit=dev --no-audit --no-fund "$GUGU_ABC_TARBALL"
+          npm install --prefix "$RUNNER_TEMP/cli-990" --no-audit --no-fund @anthropic-ai/claude-code@2.1.293
+          mkdir -p "$RUNNER_TEMP/claude-config-990" "$RUNNER_TEMP/abc-work-990"
+      - name: Full ABC with real CLI 2.1.293 and the CI model service
+        shell: bash
+        env:
+          ABC_ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
+          ABC_ANTHROPIC_AUTH_TOKEN: ${{ secrets.ABC_ANTHROPIC_AUTH_TOKEN }}
+          ABC_ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/claude-config-990
+        run: |
+          set -euo pipefail
+          test -n "$ABC_ANTHROPIC_BASE_URL"
+          test -n "$ABC_ANTHROPIC_AUTH_TOKEN"
+          timeout 12m node scripts/abc.mjs \
+            --adapter "$RUNNER_TEMP/bridge-990/node_modules/@gugu-acp/claude-agent-acp/dist/index.js" \
+            --cli "$RUNNER_TEMP/cli-990/node_modules/.bin/claude" \
+            --work "$RUNNER_TEMP/abc-work-990" | tee abc-2.1.293.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stop-hook-990-abc-2.1.293
+          path: |
+            build.log
+            abc-2.1.293.log
+          if-no-files-found: warn
+          retention-days: 14
