@@ -1,0 +1,225 @@
+From 511b03527b83466dbda64a836f5dd6e5a2cb7077 Mon Sep 17 00:00:00 2001
+From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 16:05:33 +0800
+Subject: [PATCH] fix: keep queued echoes from ending unfinished foreground
+ work
+
+Why: an SDK echo for an already queued input can arrive before the active
+input's answer and result. Do not fabricate end_turn at that echo. Remember
+it, keep the active input's text and usage, and activate the queued head only
+after the preceding input has a real outcome. Recorded cancellation, held
+subagent results and explicit steering retain their existing handoffs.
+
+Upstream: no upstream PR yet; tracked in shuxueshuxue/gugu-acp#50 and
+OpenDCAI/gugu#1077.
+
+Drop: when the pinned upstream bridge preserves foreground answer ownership
+across queued input echoes and passes this turn-events regression.
+---
+ src/acp-agent.ts              | 22 +++++++--
+ src/tests/turn-events.test.ts | 89 +++++++++++++++++++++++++++++++++--
+ 2 files changed, 101 insertions(+), 10 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 93d6a72..eba7a94 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -793,6 +793,8 @@ type Turn = {
+    *  activates the same turn again in the fresh session, which must not report
+    *  it twice. */
+   insertedReported?: boolean;
++  /** A later input can be echoed while the preceding turn still owns its answer. */
++  nativeEchoSeen?: boolean;
+   /** Tools surfaced during this turn, awaiting completion or an explicit
+    *  background handoff. Intersect with emittedToolCalls at settlement so
+    *  tool_result counts even when a presentation hook is still pending. */
+@@ -5135,6 +5137,13 @@ export class ClaudeAcpAgent {
+      *  the autonomous stretch-close guard. */
+     const firstUnsettledQueuedTurn = () => (session.turnQueue ?? []).find((t) => !t.settled);
+ 
++    const activateEchoedHead = () => {
++      if (session.activeTurn || session.cancelled || session.queryClosed || session.tornDown)
++        return;
++      const next = firstUnsettledQueuedTurn();
++      if (next?.nativeEchoSeen) activateTurn(next);
++    };
++
+     /** Claim the structured replacement for the turn currently producing a
+      * local-command output. Undefined means this is not a structured
+      * local-command turn (or its request failed), null means another SDK
+@@ -5597,6 +5606,7 @@ export class ClaudeAcpAgent {
+         session.emittedAssistantText = false;
+       }
+       turn.resolve(result);
++      activateEchoedHead();
+     };
+ 
+     /** Reject the active turn (auth required, error result, …) without tearing
+@@ -5621,6 +5631,7 @@ export class ClaudeAcpAgent {
+       // suppress the next turn's issue-#453 result-text fallback.
+       session.emittedAssistantText = false;
+       turn.reject(error);
++      activateEchoedHead();
+     };
+ 
+     /** Complete a negotiated terminal failure on the prompt response itself,
+@@ -7944,8 +7955,8 @@ export class ClaudeAcpAgent {
+             }
+ 
+             // A replayed user message echoes a queued turn back in submission
+-            // order. The first echo promotes that turn to active; if a different
+-            // turn is still active, it is handed off (settled end_turn) first.
++            // order. An echo admits input; it cannot supply an unfinished turn's
++            // outcome. Its activation waits for the preceding turn's real result.
+             // Done before the `cancelled` guard so a turn enqueued after a cancel
+             // is still promoted — activateTurn() clears the flag. The turn's own
+             // echo is then dropped from the feed (the client already shows it).
+@@ -8000,8 +8011,8 @@ export class ClaudeAcpAgent {
+                       // Same for a turn with an open steer (see
+                       // Turn.steeredEchoes): the user moving on outranks the
+                       // steered continuation, but its last result's stop reason
+-                      // stands. With no result yet it falls through to the
+-                      // end_turn hand-off below, owing nothing there.
++                      // stands. With no result yet, keep that turn active until
++                      // its own outcome arrives.
+                       //
+                       // The steer lane normally pays for that result's trailing
+                       // idle by settling on it; this hand-off settles instead,
+@@ -8011,7 +8022,8 @@ export class ClaudeAcpAgent {
+                       session.owedTrailingIdles++;
+                       await settleActive(session.activeTurn.steeredSettle);
+                     } else {
+-                      await settleActive(turnOutcome(session, "end_turn"));
++                      queued.nativeEchoSeen = true;
++                      break;
+                     }
+                   }
+                   // Unlike the no-result teardown lanes, this hand-off must
+diff --git a/src/tests/turn-events.test.ts b/src/tests/turn-events.test.ts
+index 2a1e787..21633d8 100644
+--- a/src/tests/turn-events.test.ts
++++ b/src/tests/turn-events.test.ts
+@@ -247,6 +247,86 @@ describe("turn events", () => {
+     prompt: [{ type: "text" as const, text }],
+   });
+ 
++  it("does not finish unfinished foreground work merely because another input was echoed", async () => {
++    const trace: string[] = [];
++    onSessionUpdate = ({ update }) => {
++      if (
++        update.sessionUpdate === "agent_message_chunk" &&
++        update.content.type === "text" &&
++        update.messageId?.endsWith("-answer")
++      ) {
++        trace.push(update.content.text);
++      }
++    };
++    const secondEchoed = Promise.withResolvers<void>();
++    const releaseResult = Promise.withResolvers<void>();
++    scriptQuery(async function* (input, options) {
++      const sessionId = options.sessionId!;
++      const first = (await input.next()).value;
++      yield echo(first, sessionId);
++      const second = (await input.next()).value;
++      yield echo(second, sessionId);
++      secondEchoed.resolve();
++      await releaseResult.promise;
++      yield* streamedText("first-answer", "Answer to first input", sessionId);
++      yield {
++        ...result(sessionId),
++        user_message_uuid: first.uuid,
++        usage: {
++          input_tokens: 17,
++          output_tokens: 5,
++          cache_read_input_tokens: 0,
++          cache_creation_input_tokens: 0,
++        },
++      };
++      yield system("session_state_changed", sessionId, { state: "idle" });
++      yield* streamedText("second-answer", "Answer to second input", sessionId);
++      yield {
++        ...result(sessionId),
++        user_message_uuid: second.uuid,
++        usage: {
++          input_tokens: 29,
++          output_tokens: 7,
++          cache_read_input_tokens: 0,
++          cache_creation_input_tokens: 0,
++        },
++      };
++      yield system("session_state_changed", sessionId, { state: "idle" });
++      await input.next();
++    });
++    const sessionId = await newSession();
++    const first = recordEvents(trace, "first");
++    const second = recordEvents(trace, "second");
++    const outcomes: Parameters<TurnEvents["ended"]>[0][] = [];
++    const withUsage = (events: TurnEvents): TurnEvents => ({
++      ...events,
++      ended: (outcome) => {
++        outcomes.push(outcome);
++        events.ended(outcome);
++      },
++    });
++    try {
++      await agent.startTurn(prompt(sessionId, "first"), withUsage(first.events));
++      await vi.waitFor(() => expect(first.log).toHaveLength(1));
++      await agent.startTurn(prompt(sessionId, "second"), withUsage(second.events));
++      await secondEchoed.promise;
++      expect(trace).toEqual([expect.stringMatching(/^first inserted /)]);
++      releaseResult.resolve();
++      await Promise.all([first.done, second.done]);
++      expect(trace).toEqual([
++        expect.stringMatching(/^first inserted /),
++        "Answer to first input",
++        "first ended end_turn",
++        expect.stringMatching(/^second inserted /),
++        "Answer to second input",
++        "second ended end_turn",
++      ]);
++      expect(outcomes.map((outcome) => outcome.usage?.inputTokens)).toEqual([17, 29]);
++    } finally {
++      releaseResult.resolve();
++    }
++  });
++
+   it("reports a turn as inserted under the uuid of its user message, then ended", async () => {
+     const promptUuids = scriptTurns([
+       async function* (options) {
+@@ -719,7 +799,7 @@ describe("turn events", () => {
+     ]);
+   });
+ 
+-  it("does not insert a turn that a cancel ended while the previous turn was handed off", async () => {
++  it("does not insert an echoed queued turn that cancellation ended before the previous work finished", async () => {
+     scriptTurns([
+       async function* (options) {
+         // The turn ends with a tool call that never got its result.
+@@ -745,7 +825,7 @@ describe("turn events", () => {
+       async function* () {},
+     ]);
+     agent.forceCancelGraceMs = 10;
+-    // The hand-off to the second turn fails the open tool call; hold that update.
++    // Cancellation closes the active turn's open tool call; hold that update.
+     const failedToolCall = Promise.withResolvers<void>();
+     const releaseUpdate = Promise.withResolvers<void>();
+     onSessionUpdate = async ({ update }) => {
+@@ -761,13 +841,12 @@ describe("turn events", () => {
+     await agent.startTurn(prompt(sessionId, "first"), first.events);
+     await vi.waitFor(() => expect(first.log).toHaveLength(1));
+     await agent.startTurn(prompt(sessionId, "second"), second.events);
+-    await failedToolCall.promise;
+     const cancelling = agent.cancel({ sessionId });
++    await failedToolCall.promise;
+     await vi.waitFor(() => expect(second.log).toEqual(["ended cancelled"]));
+     releaseUpdate.resolve();
+     await Promise.all([cancelling, first.done]);
+-    // The hand-off then activates the second turn in promise continuations,
+-    // which all run before a timer.
++    // No queued activation may escape cancellation in its promise continuations.
+     await new Promise((resolve) => setTimeout(resolve, 0));
+ 
+     expect(second.log).toEqual(["ended cancelled"]);
+-- 
+2.44.0
+
