@@ -25,9 +25,9 @@ writeFileSync(join(dir, 'compat.json'), `${JSON.stringify(compat, null, 2)}\n`)
 writeFileSync(join(dir, 'package.json'), `${JSON.stringify({
   name: '@gugu-acp/compat',
   version,
-  description: 'Which @gugu-acp bridge release serves which CLI version (compat.json of shuxueshuxue/gugu-acp)',
+  description: 'Which @gugu-acp bridge release serves which CLI version (compat.json of GUYI-AI/gugu-acp)',
   license: 'Apache-2.0',
-  repository: { type: 'git', url: 'git+https://github.com/shuxueshuxue/gugu-acp.git' },
+  repository: { type: 'git', url: 'git+https://github.com/GUYI-AI/gugu-acp.git' },
   files: ['compat.json'],
   main: 'compat.json',
   gugu: { compat },
