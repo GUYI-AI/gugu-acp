@@ -13,7 +13,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
-const REPO_URL = 'https://github.com/shuxueshuxue/gugu-acp'
+const REPO_URL = 'https://github.com/GUYI-AI/gugu-acp'
 
 function parseArgs(argv) {
   const [bridge, ...rest] = argv
