@@ -1,0 +1,135 @@
+From ba670cbca785f02199c47a05cae16abb93a6bcdb Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 18:02:38 -0500
+Subject: [PATCH] gugu: an unknown model id is rejected, not matched to a row
+ containing one of its letters
+
+Why: resolveModelPreference's last tier scored a row by substring hits of any one token, so `claude-not-a-model-9` (tokens "not", "a", "model") matched "deepseek-v4-flash" on the letter "a"; set_config_option then switched to it and acknowledged success. The tier now requires every token to be a whole word of the row's value or display name. Bare ids against a "[1m]"-spelled row, family aliases (opus, opusplan, haiku) and display names resolve as before; an id nothing matches throws "Invalid value for config option model".
+
+Upstream: none yet.
+
+Drop when: upstream's token tier no longer accepts a partial or substring match.
+---
+ src/session-model.ts                     |  9 ++++--
+ src/tests/model-resolution.test.ts       | 41 ++++++++++++++++++++++++
+ src/tests/session-config-options.test.ts | 29 +++++++++++++++++
+ 3 files changed, 77 insertions(+), 2 deletions(-)
+
+diff --git a/src/session-model.ts b/src/session-model.ts
+index 2baf738..8a8223e 100644
+--- a/src/session-model.ts
++++ b/src/session-model.ts
+@@ -102,11 +102,16 @@ function tokenizeModelPreference(model: string): { tokens: string[]; contextHint
+ }
+ 
+ function scoreModelMatch(model: ModelInfo, tokens: string[], contextHint?: string): number {
+-  const haystack = `${model.value} ${model.displayName}`.toLowerCase();
++  // Every token but the context hint must be a whole word of the row: an unknown
++  // id must not land on whichever row happens to contain one of its letters.
++  const words = new Set(`${model.value} ${model.displayName}`.toLowerCase().split(/[^a-z0-9]+/));
+   let score = 0;
+   let nonHintMatched = false;
+   for (const token of tokens) {
+-    if (!haystack.includes(token)) continue;
++    if (!words.has(token)) {
++      if (token === contextHint) continue;
++      return 0;
++    }
+     if (token !== contextHint) nonHintMatched = true;
+     score += token === contextHint ? 3 : 1;
+   }
+diff --git a/src/tests/model-resolution.test.ts b/src/tests/model-resolution.test.ts
+index 17f0b3c..ca1904c 100644
+--- a/src/tests/model-resolution.test.ts
++++ b/src/tests/model-resolution.test.ts
+@@ -40,6 +40,47 @@ const LIVE_SHAPED_MODELS: ModelInfo[] = [
+   },
+ ];
+ 
++// A session whose picker lists gateway rows by full id, some only in the
++// "[1m]" spelling, next to unrelated non-Claude rows.
++const GATEWAY_SHAPED_MODELS: ModelInfo[] = [
++  { value: "gpt-6-luna", displayName: "GPT-6 Luna", description: "" },
++  { value: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", description: "" },
++  { value: "claude-haiku-5-5[1m]", displayName: "Claude Haiku 5.5", description: "" },
++  { value: "claude-opus-5-5[1m]", displayName: "Claude Opus 5.5", description: "" },
++];
++
++describe("resolveModelPreference - token matching", () => {
++  it("lands a bare id on the row the picker lists in its '[1m]' spelling", () => {
++    expect(resolveModelPreference(GATEWAY_SHAPED_MODELS, "claude-haiku-5-5")?.value).toBe(
++      "claude-haiku-5-5[1m]",
++    );
++    expect(resolveModelPreference(GATEWAY_SHAPED_MODELS, "claude-opus-5-5-1m")?.value).toBe(
++      "claude-opus-5-5[1m]",
++    );
++  });
++
++  it("still resolves family aliases and display names", () => {
++    expect(resolveModelPreference(GATEWAY_SHAPED_MODELS, "haiku")?.value).toBe(
++      "claude-haiku-5-5[1m]",
++    );
++    expect(resolveModelPreference(GATEWAY_SHAPED_MODELS, "Claude Opus 5.5")?.value).toBe(
++      "claude-opus-5-5[1m]",
++    );
++    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "opus")?.value).toBe("opus[1m]");
++    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "opusplan")?.value).toBe("opus[1m]");
++    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "Sonnet")?.value).toBe("sonnet");
++  });
++
++  it("keeps a hinted id on its bare row when no hinted sibling is listed", () => {
++    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "claude-sonnet-5[1m]")?.value).toBe("sonnet");
++  });
++
++  it("does not land an unknown id on a row that merely contains one of its letters", () => {
++    expect(resolveModelPreference(GATEWAY_SHAPED_MODELS, "claude-not-a-model-9")).toBeNull();
++    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "claude-not-a-model-9")).toBeNull();
++  });
++});
++
+ describe("resolveModelPreference - resolvedModel matching", () => {
+   it("matches a preference that equals an alias's resolvedModel exactly", () => {
+     expect(resolveModelPreference(LIVE_SHAPED_MODELS, "claude-sonnet-5")?.value).toBe("sonnet");
+diff --git a/src/tests/session-config-options.test.ts b/src/tests/session-config-options.test.ts
+index 2231957..98cb387 100644
+--- a/src/tests/session-config-options.test.ts
++++ b/src/tests/session-config-options.test.ts
+@@ -334,6 +334,35 @@ describe("session config options", () => {
+       ).rejects.toThrow("Invalid value for config option model: gpt-4");
+     });
+ 
++    it("rejects an unknown model id instead of switching to a loosely matching row", async () => {
++      const session = (agent as unknown as { sessions: Record<string, any> }).sessions[SESSION_ID];
++      session.modelInfos = [
++        { value: "gpt-6-luna", displayName: "GPT-6 Luna", description: "" },
++        { value: "deepseek-v4-flash", displayName: "DeepSeek V4 Flash", description: "" },
++      ];
++      session.configOptions = session.configOptions.map((o: { id: string }) =>
++        o.id === "model"
++          ? {
++              ...o,
++              currentValue: "gpt-6-luna",
++              options: session.modelInfos.map((m: ModelInfo) => ({
++                value: m.value,
++                name: m.displayName,
++              })),
++            }
++          : o,
++      );
++
++      await expect(
++        agent.setSessionConfigOption({
++          sessionId: SESSION_ID,
++          configId: "model",
++          value: "claude-not-a-model-9",
++        }),
++      ).rejects.toThrow("Invalid value for config option model: claude-not-a-model-9");
++      expect(setModelSpy).not.toHaveBeenCalled();
++    });
++
+     it("returns full configOptions in the response", async () => {
+       const response = await agent.setSessionConfigOption({
+         sessionId: SESSION_ID,
+-- 
+2.43.0
+
