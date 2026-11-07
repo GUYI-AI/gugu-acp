@@ -1,4 +1,4 @@
-From da78740231f2d5465e55f78cd63a23145a94975a Mon Sep 17 00:00:00 2001
+From ba670cbca785f02199c47a05cae16abb93a6bcdb Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 18:02:38 -0500
 Subject: [PATCH] gugu: an unknown model id is rejected, not matched to a row
@@ -10,36 +10,39 @@ Upstream: none yet.
 
 Drop when: upstream's token tier no longer accepts a partial or substring match.
 ---
- src/session-model.ts                     |  6 ++--
- src/tests/model-resolution.test.ts       | 37 ++++++++++++++++++++++++
- src/tests/session-config-options.test.ts | 29 +++++++++++++++++++
- 3 files changed, 70 insertions(+), 2 deletions(-)
+ src/session-model.ts                     |  9 ++++--
+ src/tests/model-resolution.test.ts       | 41 ++++++++++++++++++++++++
+ src/tests/session-config-options.test.ts | 29 +++++++++++++++++
+ 3 files changed, 77 insertions(+), 2 deletions(-)
 
 diff --git a/src/session-model.ts b/src/session-model.ts
-index 2baf738..011be6a 100644
+index 2baf738..8a8223e 100644
 --- a/src/session-model.ts
 +++ b/src/session-model.ts
-@@ -102,11 +102,13 @@ function tokenizeModelPreference(model: string): { tokens: string[]; contextHint
+@@ -102,11 +102,16 @@ function tokenizeModelPreference(model: string): { tokens: string[]; contextHint
  }
  
  function scoreModelMatch(model: ModelInfo, tokens: string[], contextHint?: string): number {
 -  const haystack = `${model.value} ${model.displayName}`.toLowerCase();
-+  // Every token must be a whole word of the row: an unknown id must not land on
-+  // whichever row happens to contain one of its letters.
++  // Every token but the context hint must be a whole word of the row: an unknown
++  // id must not land on whichever row happens to contain one of its letters.
 +  const words = new Set(`${model.value} ${model.displayName}`.toLowerCase().split(/[^a-z0-9]+/));
    let score = 0;
    let nonHintMatched = false;
    for (const token of tokens) {
 -    if (!haystack.includes(token)) continue;
-+    if (!words.has(token)) return 0;
++    if (!words.has(token)) {
++      if (token === contextHint) continue;
++      return 0;
++    }
      if (token !== contextHint) nonHintMatched = true;
      score += token === contextHint ? 3 : 1;
    }
 diff --git a/src/tests/model-resolution.test.ts b/src/tests/model-resolution.test.ts
-index 17f0b3c..47325e2 100644
+index 17f0b3c..ca1904c 100644
 --- a/src/tests/model-resolution.test.ts
 +++ b/src/tests/model-resolution.test.ts
-@@ -40,6 +40,43 @@ const LIVE_SHAPED_MODELS: ModelInfo[] = [
+@@ -40,6 +40,47 @@ const LIVE_SHAPED_MODELS: ModelInfo[] = [
    },
  ];
  
@@ -72,6 +75,10 @@ index 17f0b3c..47325e2 100644
 +    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "opus")?.value).toBe("opus[1m]");
 +    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "opusplan")?.value).toBe("opus[1m]");
 +    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "Sonnet")?.value).toBe("sonnet");
++  });
++
++  it("keeps a hinted id on its bare row when no hinted sibling is listed", () => {
++    expect(resolveModelPreference(LIVE_SHAPED_MODELS, "claude-sonnet-5[1m]")?.value).toBe("sonnet");
 +  });
 +
 +  it("does not land an unknown id on a row that merely contains one of its letters", () => {
