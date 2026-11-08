@@ -1,4 +1,4 @@
-From ff6586415f10f66c57e135cb6ac675dcf39c8146 Mon Sep 17 00:00:00 2001
+From 2821b59aa483e15a21a8cc3d7bffaa0255d60ba2 Mon Sep 17 00:00:00 2001
 From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
 Date: Fri, 30 Oct 2026 05:07:52 +0800
 Subject: [PATCH 15/16] gugu: forward native blocking Stop hook notices
@@ -18,7 +18,7 @@ Drop when: upstream enables and forwards blocking Stop responses through ACP not
  create mode 100644 src/tests/stop-hook-notice.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 009ef82..55686ce 100644
+index a4caac5..5a32b9d 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -243,6 +243,7 @@ import {
@@ -78,7 +78,7 @@ index 009ef82..55686ce 100644
                case "task_progress":
                  if (isLateTaskRun(session, message.task_id, message.run_id)) {
                    this.logger.log(
-@@ -12313,6 +12338,9 @@ export class ClaudeAcpAgent {
+@@ -12363,6 +12388,9 @@ export class ClaudeAcpAgent {
        // Before `userProvidedOptions`, so a client that passes
        // `promptSuggestions: false` keeps it off.
        promptSuggestions: true,

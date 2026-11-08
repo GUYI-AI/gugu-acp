@@ -1,4 +1,4 @@
-From 479f174cbdc22496b705fc41c362bf1ae7036c0e Mon Sep 17 00:00:00 2001
+From 88e8b77b058c87fbcebc3ef012712e2a490b9f75 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 18:02:38 -0500
 Subject: [PATCH 16/16] gugu: an unknown model id is rejected, not matched to a
@@ -94,7 +94,7 @@ index 95556df..fc5d6fe 100644
    it("matches a preference that equals an alias's resolvedModel exactly", () => {
      expect(resolveModelPreference(LIVE_SHAPED_MODELS, "claude-sonnet-5")?.value).toBe("sonnet");
 diff --git a/src/tests/session-config-options.test.ts b/src/tests/session-config-options.test.ts
-index 49c6204..b9872d0 100644
+index 56b6a85..47a96b9 100644
 --- a/src/tests/session-config-options.test.ts
 +++ b/src/tests/session-config-options.test.ts
 @@ -358,6 +358,35 @@ describe("session config options", () => {

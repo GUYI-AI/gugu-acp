@@ -1,4 +1,4 @@
-From 67ec77d5329dbb0ca916b762fd54766002b43e0d Mon Sep 17 00:00:00 2001
+From dd1aa97521d0a4e625f4ffcd4fa302821f074fe7 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:02:29 -0700
 Subject: [PATCH 05/16] gugu: a login that names no identity is not "logged
@@ -30,7 +30,7 @@ key source to `none`.
  3 files changed, 29 insertions(+), 5 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 5e4ab63..6cfb959 100644
+index 8b2f20a..d04c220 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -3585,7 +3585,7 @@ export class ClaudeAcpAgent {

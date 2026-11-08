@@ -1,4 +1,4 @@
-From b0e95c84496b432836d3fe55850fecd14e149b58 Mon Sep 17 00:00:00 2001
+From a0426f549c5a11a3447d95b01cce9c56d19e3b20 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Wed, 9 Sep 2026 01:50:37 +0800
 Subject: [PATCH 02/16] gugu: forward forkSession for Claude sessions

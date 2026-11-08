@@ -1,18 +1,30 @@
-From 1a26bce299b009f8d919d5359c05fd6b8fe2da6a Mon Sep 17 00:00:00 2001
+From bffa94ab55da5dfe375ebbad817a14a55d5cca57 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 19:26:05 -0500
 Subject: [PATCH 03/16] gugu: offer Claude's UltraCode as a session effort
 
 Why: Gugu's released clients pick UltraCode as one more row of the effort
 picker (`effort` = `ultracode`) and read it back from the effort option. Since
-v0.101.0 upstream exposes ultracode as its own session config option
+v0.97.0 upstream exposes ultracode as its own session config option
 (`ultracode`, #1438), with the CLI's availability report. This patch is now a
-thin view of that state: the effort row is offered exactly while upstream's
-ultracode toggle is supported, and is the current effort while ultracode is
-on. Picking the row calls upstream's `applyUltracode(true)` and clears an
-ordinary effort pin (`{ultracode: true, effortLevel: null}`, the same flag
-write as before); leaving it calls `applyUltracode(false)` and applies the new
-effort. `ultracode` is never sent to the CLI as an effort level.
+thin layer over that state, with one rule: the row is an `ultracode` effort
+pin, and the pin exists only while ultracode is on.
+
+- The row is offered exactly while upstream's ultracode toggle is supported.
+- Picking it writes `{effortLevel: null, ultracode: true}` and pins
+  `ultracode`; leaving it writes `{effortLevel: <new>, ultracode: false}` (one
+  flag write each, as 1.6.x).
+- The pin survives a switch between models that support ultracode; a switch to
+  a model without ultracode turns ultracode off with it (as 1.6.x), so coming
+  back shows and runs an ordinary effort.
+- A session started with ultracode on, on a model that supports it, starts
+  with the row pinned; elsewhere it shows its settings effort.
+- Any path that turns ultracode off (including upstream's own toggle) ends the
+  pin. Ultracode turned on through the toggle keeps upstream's semantics (any
+  effort, retained across switches).
+- After a query restart, ultracode intent is restored again after the effort.
+- `ultracode` is never sent to the CLI as an effort level, and a creation-time
+  effort of `ultracode` does not pick the row.
 
 Upstream: none needed for the capability (#1438 provides it); this patch only
 keeps Gugu's existing client surface.
@@ -21,15 +33,16 @@ Drop when: Gugu's client drives upstream's native `ultracode` config option
 instead of the effort row, and the bridge releases that client reads move to a
 new compat key (so released clients never meet a bridge without the row).
 ---
- src/acp-agent.ts                         | 29 ++++++++++--
- src/session-effort.ts                    | 24 +++++++++-
- src/tests/session-config-options.test.ts | 41 +++++++++++++++++
- src/tests/ultracode-effort.test.ts       | 56 ++++++++++++++++++++++++
- 4 files changed, 145 insertions(+), 5 deletions(-)
+ src/acp-agent.ts                         | 107 ++++++++++++++++++++---
+ src/session-effort.ts                    |  24 ++++-
+ src/tests/session-config-options.test.ts |  42 +++++++++
+ src/tests/ultracode-config.test.ts       | 101 +++++++++++++++++++++
+ src/tests/ultracode-effort.test.ts       |  56 ++++++++++++
+ 5 files changed, 318 insertions(+), 12 deletions(-)
  create mode 100644 src/tests/ultracode-effort.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index d2b3f26..60c7dc5 100644
+index d2b3f26..db7bc33 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -385,6 +385,7 @@ import {
@@ -40,7 +53,47 @@ index d2b3f26..60c7dc5 100644
  } from "./session-effort.js";
  import {
    createUltracodeConfigOption,
-@@ -11530,8 +11531,11 @@ export class ClaudeAcpAgent {
+@@ -9576,7 +9577,15 @@ export class ClaudeAcpAgent {
+       return { configOptions: session.configOptions };
+     }
+     if (params.configId === ULTRACODE_CONFIG_ID) {
+-      await this.applyUltracode(session, resolveUltracodeEnabled(params));
++      const enabled = resolveUltracodeEnabled(params);
++      const rowEnded = !enabled && session.effortPinnedLevel === ULTRACODE_EFFORT_ID;
++      await this.applyUltracode(session, enabled);
++      // Gugu: an opted-in client runs the effort it is shown, as after a switch.
++      const shown = session.configOptions.find((o) => o.id === EFFORT_CONFIG_ID)?.currentValue;
++      if (rowEnded && clientSupportsRecommendedConfigValue(this.clientCapabilities) && typeof shown === "string") {
++        await session.query.applyFlagSettings(effortFlagSettings(shown, false));
++        session.appliedEffortLevel = shown !== "default" ? shown : undefined;
++      }
+       return { configOptions: session.configOptions };
+     }
+ 
+@@ -11521,6 +11530,22 @@ export class ClaudeAcpAgent {
+       const currentEffort =
+         typeof effortOpt?.currentValue === "string" ? effortOpt.currentValue : undefined;
+       const useRecommendedValue = clientSupportsRecommendedConfigValue(this.clientCapabilities);
++      // Gugu: the UltraCode row ends on a model that cannot run ultracode, as
++      // it did in 1.6.x: ultracode goes off and the pin with it (before the pin
++      // is read below), so coming back shows and runs an ordinary effort. A
++      // toggle-driven ultracode (upstream's option) keeps its retained intent.
++      if (
++        session.effortPinnedLevel === ULTRACODE_EFFORT_ID &&
++        !ultracodeSupported(session.ultracodeWorkflowsEnabled, newModelInfo)
++      ) {
++        try {
++          await this.applyUltracode(session, false);
++        } catch (error) {
++          // Best-effort like the effort sync below: setModel already succeeded.
++          // applyUltracode leaves the session untouched on a rejected request.
++          this.logger.error(`Failed to turn ultracode off after model switch to "${value}":`, error);
++        }
++      }
+       const pinnedEffort = session.effortPinnedLevel;
+       const effortWasPinned = pinnedEffort !== undefined;
+       const appliedEffortBeforeSwitch =
+@@ -11530,8 +11555,11 @@ export class ClaudeAcpAgent {
            : pinnedEffort);
        const effortPinnedForNewModel =
          effortWasPinned &&
@@ -54,42 +107,125 @@ index d2b3f26..60c7dc5 100644
        const seedEffort = effortPinnedForNewModel
          ? pinnedEffort
          : settingsEffortForModel(
-@@ -11661,7 +11665,21 @@ export class ClaudeAcpAgent {
+@@ -11661,10 +11689,28 @@ export class ClaudeAcpAgent {
        session.configOptions = session.configOptions.map((o) =>
          o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
        );
 +    } else if (configId === EFFORT_CONFIG_ID && value === ULTRACODE_EFFORT_ID) {
 +      // Gugu: the UltraCode row turns ultracode on and clears an ordinary
-+      // effort pin, as the row always has.
-+      await this.applyUltracode(session, true);
++      // effort pin in one flag write, as 1.6.x did.
 +      await session.query.applyFlagSettings(effortFlagSettings(undefined, true));
++      this.noteUltracode(session, true);
 +      session.configOptions = session.configOptions.map((o) =>
 +        o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
 +      );
 +      session.appliedEffortLevel = undefined;
 +      session.effortPinnedLevel = ULTRACODE_EFFORT_ID;
      } else if (configId === EFFORT_CONFIG_ID) {
-+      // Gugu: leaving the UltraCode row turns ultracode off.
-+      const leavingUltracode =
-+        session.configOptions.find((o) => o.id === configId)?.currentValue === ULTRACODE_EFFORT_ID;
-+      if (leavingUltracode) await this.applyUltracode(session, false);
++      // Gugu: leaving the UltraCode row turns ultracode off in the same flag
++      // write as the new effort, as 1.6.x did.
++      const leavingUltracode = session.effortPinnedLevel === ULTRACODE_EFFORT_ID;
        // Apply first so a rejected control request cannot leave the displayed
        // value ahead of the SDK flag layer.
-       await session.query.applyFlagSettings(effortFlagSettings(value, session.ultracodeEnabled));
-@@ -12647,7 +12665,11 @@ export class ClaudeAcpAgent {
+-      await session.query.applyFlagSettings(effortFlagSettings(value, session.ultracodeEnabled));
++      await session.query.applyFlagSettings(
++        leavingUltracode
++          ? { ...effortFlagSettings(value, false), ultracode: false }
++          : effortFlagSettings(value, session.ultracodeEnabled),
++      );
++      if (leavingUltracode) this.noteUltracode(session, false);
+       session.configOptions = session.configOptions.map((o) =>
+         o.id === configId && typeof o.currentValue === "string" ? { ...o, currentValue: value } : o,
+       );
+@@ -11752,6 +11798,14 @@ export class ClaudeAcpAgent {
+    *  state and option untouched. */
+   private async applyUltracode(session: Session, enabled: boolean): Promise<void> {
+     await session.query.applyFlagSettings({ ultracode: enabled });
++    this.noteUltracode(session, enabled);
++  }
++
++  /** Record an ultracode state the CLI has taken and refresh its option.
++   *  Gugu: the UltraCode effort row (an `ultracode` effort pin) exists only
++   *  while ultracode is on, so turning ultracode off by any path also ends the
++   *  row: the pin goes and the effort option shows what the CLI now runs. */
++  private noteUltracode(session: Session, enabled: boolean): void {
+     session.ultracodeEnabled = enabled;
+     const refreshed = createUltracodeConfigOption(
+       enabled,
+@@ -11760,6 +11814,20 @@ export class ClaudeAcpAgent {
+     session.configOptions = session.configOptions.map((o) =>
+       o.id === ULTRACODE_CONFIG_ID ? refreshed : o,
+     );
++    if (enabled || session.effortPinnedLevel !== ULTRACODE_EFFORT_ID) return;
++    session.effortPinnedLevel = undefined;
++    session.appliedEffortLevel = undefined;
++    const modelInfo = session.modelInfos.find((m) => m.value === session.models.currentModelId);
++    const effort = buildEffortConfigOption(
++      session.modelInfos,
++      session.models.currentModelId,
++      undefined,
++      clientSupportsRecommendedConfigValue(this.clientCapabilities),
++      { supported: ultracodeSupported(session.ultracodeWorkflowsEnabled, modelInfo) },
++    );
++    session.configOptions = session.configOptions.flatMap((o) =>
++      o.id !== EFFORT_CONFIG_ID ? [o] : effort ? [effort] : [],
++    );
+   }
+ 
+   /** Reconcile the session's Fast mode toggle with an SDK-reported
+@@ -12647,7 +12715,15 @@ export class ClaudeAcpAgent {
          modes,
          models,
          modelInfos,
 -        userProvidedOptions?.effort ?? settingsEffortForModel(effortSettings, currentModelInfo),
-+        userProvidedOptions?.effort ??
-+          // Gugu: a session started with ultracode on shows the UltraCode row.
-+          (ultracodeEnabled
++        // Gugu: a session started with ultracode on shows the UltraCode row
++        // where ultracode can run. A creation-time effort cannot pick the row:
++        // it never turns ultracode on.
++        ((userProvidedOptions?.effort as string | undefined) !== ULTRACODE_EFFORT_ID
++          ? userProvidedOptions?.effort
++          : undefined) ??
++          (ultracodeEnabled && ultracode.supported
 +            ? ULTRACODE_EFFORT_ID
 +            : settingsEffortForModel(effortSettings, currentModelInfo)),
          agents,
          currentAgent,
          fastMode,
-@@ -13726,6 +13748,7 @@ export function buildConfigOptions(
+@@ -12714,12 +12790,17 @@ export class ClaudeAcpAgent {
+         autoModeFallbackWarningPending,
+         configOptions,
+         effortPinnedLevel:
+-          userProvidedOptions?.effort !== undefined &&
+-          initialEffort?.currentValue === userProvidedOptions.effort
+-            ? userProvidedOptions.effort
+-            : undefined,
++          // Gugu: the row shown at start is a pin like a picked one.
++          initialEffort?.currentValue === ULTRACODE_EFFORT_ID
++            ? ULTRACODE_EFFORT_ID
++            : userProvidedOptions?.effort !== undefined &&
++                initialEffort?.currentValue === userProvidedOptions.effort
++              ? userProvidedOptions.effort
++              : undefined,
+         appliedEffortLevel:
+-          useRecommendedValue && typeof initialEffort?.currentValue === "string"
++          initialEffort?.currentValue === ULTRACODE_EFFORT_ID
++            ? undefined
++            : useRecommendedValue && typeof initialEffort?.currentValue === "string"
+             ? initialEffort.currentValue
+             : userProvidedOptions?.effort !== undefined &&
+                 initialEffort?.currentValue === userProvidedOptions.effort
+@@ -12970,6 +13051,11 @@ export class ClaudeAcpAgent {
+     if (previous.effortPinnedLevel !== undefined) {
+       await select(EFFORT_CONFIG_ID, previous.effortPinnedLevel);
+     }
++    // Gugu: restoring an ordinary effort over a started-on UltraCode row of
++    // the new query ends that row and ultracode with it; restore the intent.
++    if (session.ultracodeEnabled !== previous.ultracodeEnabled) {
++      await restore("ultracode", () => this.applyUltracode(session, previous.ultracodeEnabled));
++    }
+     // Even when unchanged: Default over a hidden creation-time agent like "Explore" must clear it.
+     if (previous.agentSelected) {
+       if (previous.currentAgent === DEFAULT_AGENT_ID) {
+@@ -13726,6 +13812,7 @@ export function buildConfigOptions(
      models.currentModelId,
      currentEffortLevel,
      presentation?.useRecommendedValue === true,
@@ -151,10 +287,10 @@ index 68b69cf..25b7f5b 100644
      currentEffortLevel && includes(currentEffortLevel)
        ? currentEffortLevel
 diff --git a/src/tests/session-config-options.test.ts b/src/tests/session-config-options.test.ts
-index 7179504..49c6204 100644
+index 7179504..56b6a85 100644
 --- a/src/tests/session-config-options.test.ts
 +++ b/src/tests/session-config-options.test.ts
-@@ -553,6 +553,47 @@ describe("session config options", () => {
+@@ -553,6 +553,48 @@ describe("session config options", () => {
        expect(applyFlagSettingsSpy).toHaveBeenCalledWith({ effortLevel: "low" });
      });
  
@@ -173,17 +309,18 @@ index 7179504..49c6204 100644
 +        value: "ultracode",
 +      });
 +
++      // One flag write, as 1.6.x.
 +      expect(applyFlagSettingsSpy.mock.calls.map((call) => call[0])).toEqual([
-+        { ultracode: true },
 +        { effortLevel: null, ultracode: true },
 +      ]);
 +      expect(session.ultracodeEnabled).toBe(true);
 +      expect(response.configOptions.find((o) => o.id === "effort")?.currentValue).toBe("ultracode");
 +    });
 +
-+    it("Gugu: leaving the UltraCode row turns ultracode off, then applies the effort", async () => {
++    it("Gugu: leaving the UltraCode row turns ultracode off with the effort", async () => {
 +      const session = (agent as unknown as { sessions: Record<string, any> }).sessions[SESSION_ID];
 +      session.ultracodeEnabled = true;
++      session.effortPinnedLevel = "ultracode";
 +      session.configOptions = session.configOptions.map((o: any) =>
 +        o.id === "effort"
 +          ? { ...o, currentValue: "ultracode", options: [...o.options, { value: "ultracode", name: "UltraCode" }] }
@@ -192,9 +329,9 @@ index 7179504..49c6204 100644
 +
 +      await agent.setSessionConfigOption({ sessionId: SESSION_ID, configId: "effort", value: "low" });
 +
++      // One flag write, as 1.6.x.
 +      expect(applyFlagSettingsSpy.mock.calls.map((call) => call[0])).toEqual([
-+        { ultracode: false },
-+        { effortLevel: "low" },
++        { effortLevel: "low", ultracode: false },
 +      ]);
 +      expect(session.ultracodeEnabled).toBe(false);
 +    });
@@ -202,6 +339,118 @@ index 7179504..49c6204 100644
      it("calls applyFlagSettings with null effortLevel for 'default'", async () => {
        // Set effort to a non-default value first
        const session = (agent as unknown as { sessions: Record<string, any> }).sessions[SESSION_ID];
+diff --git a/src/tests/ultracode-config.test.ts b/src/tests/ultracode-config.test.ts
+index 9ce3fb9..5833a89 100644
+--- a/src/tests/ultracode-config.test.ts
++++ b/src/tests/ultracode-config.test.ts
+@@ -277,6 +277,107 @@ describe("ultracode session config option", () => {
+     expect(applyFlagSettings).toHaveBeenLastCalledWith({ effortLevel: "medium", ultracode: true });
+   });
+ 
++  // Gugu (0003): the UltraCode effort row.
++  it("Gugu: the UltraCode row turns ultracode off on a model without it, and it stays off back on Opus", async () => {
++    const { agent, sessionId, applyFlagSettings, ultracodeOption } = await createSession({});
++    const effort = () =>
++      agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue;
++
++    await agent.setSessionConfigOption({ sessionId, configId: "effort", value: "ultracode" });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(true);
++
++    await agent.setSessionConfigOption({ sessionId, configId: "model", value: "claude-opus-4-6" });
++    expect(applyFlagSettings).toHaveBeenCalledWith({ ultracode: false });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(false);
++
++    await agent.setSessionConfigOption({ sessionId, configId: "model", value: "opus" });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(false);
++    expect(effort()).not.toBe("ultracode");
++    expect(ultracodeOption()).toEqual(createUltracodeConfigOption(false, true));
++
++    await agent.setSessionConfigOption({ sessionId, configId: "effort", value: "low" });
++    expect(applyFlagSettings).toHaveBeenLastCalledWith({ effortLevel: "low" });
++  });
++
++  it("Gugu: a session started with ultracode on shows the row, and loses it the same way", async () => {
++    const { agent, sessionId } = await createSession({ settings: { ultracode: true } });
++    const effort = () =>
++      agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue;
++    expect(effort()).toBe("ultracode");
++
++    await agent.setSessionConfigOption({ sessionId, configId: "model", value: "claude-opus-4-6" });
++    await agent.setSessionConfigOption({ sessionId, configId: "model", value: "opus" });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(false);
++    expect(effort()).not.toBe("ultracode");
++  });
++
++  it("Gugu: switching between two ultracode models keeps the UltraCode row on", async () => {
++    const { agent, sessionId } = await createSession({});
++    await agent.setSessionConfigOption({ sessionId, configId: "effort", value: "ultracode" });
++    await agent.setSessionConfigOption({ sessionId, configId: "model", value: "fable" });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(true);
++    expect(
++      agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue,
++    ).toBe("ultracode");
++  });
++
++  it("Gugu: a started-on UltraCode row survives a switch to another ultracode model and can still be left", async () => {
++    const { agent, sessionId, applyFlagSettings } = await createSession({ settings: { ultracode: true } });
++    const effort = () =>
++      agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue;
++    await agent.setSessionConfigOption({ sessionId, configId: "model", value: "fable" });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(true);
++    expect(effort()).toBe("ultracode");
++
++    await agent.setSessionConfigOption({ sessionId, configId: "effort", value: "high" });
++    expect(applyFlagSettings).toHaveBeenLastCalledWith({ effortLevel: "high", ultracode: false });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(false);
++  });
++
++  it("Gugu: turning ultracode off with upstream's toggle ends the row and its pin", async () => {
++    const { agent, sessionId } = await createSession({});
++    const effort = () =>
++      agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue;
++    await agent.setSessionConfigOption({ sessionId, configId: "effort", value: "ultracode" });
++    await agent.setSessionConfigOption({
++      sessionId,
++      configId: ULTRACODE_CONFIG_ID,
++      type: "boolean",
++      value: false,
++    });
++    expect(agent.sessions[sessionId].effortPinnedLevel).toBeUndefined();
++    expect(effort()).not.toBe("ultracode");
++
++    await agent.setSessionConfigOption({ sessionId, configId: "model", value: "fable" });
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(false);
++    expect(effort()).not.toBe("ultracode");
++  });
++
++  it("Gugu: a rejected row pick changes nothing", async () => {
++    const { agent, sessionId, applyFlagSettings } = await createSession({});
++    const before = agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue;
++    applyFlagSettings.mockRejectedValueOnce(new Error("nope"));
++    await expect(
++      agent.setSessionConfigOption({ sessionId, configId: "effort", value: "ultracode" }),
++    ).rejects.toThrow("nope");
++    expect(agent.sessions[sessionId].ultracodeEnabled).toBe(false);
++    expect(agent.sessions[sessionId].effortPinnedLevel).toBeUndefined();
++    expect(agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue).toBe(
++      before,
++    );
++  });
++
++  it("Gugu: ultracode requested on a model without it keeps the settings effort", async () => {
++    const { agent, sessionId } = await createSession({
++      models: [OLD_OPUS, OPUS, FABLE],
++      settings: { ultracode: true, effortLevel: "high" },
++    });
++    expect(
++      agent.sessions[sessionId].configOptions.find((o) => o.id === "effort")?.currentValue,
++    ).toBe("high");
++    expect(agent.sessions[sessionId].effortPinnedLevel).toBeUndefined();
++  });
++
+   it("does not change session state when the SDK rejects the flag", async () => {
+     const { agent, sessionId, applyFlagSettings, ultracodeOption } = await createSession({});
+     applyFlagSettings.mockRejectedValueOnce(new Error("nope"));
 diff --git a/src/tests/ultracode-effort.test.ts b/src/tests/ultracode-effort.test.ts
 new file mode 100644
 index 0000000..6c4e9cc

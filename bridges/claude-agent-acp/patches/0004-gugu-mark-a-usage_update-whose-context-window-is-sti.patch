@@ -1,4 +1,4 @@
-From fcfb231fb7402161b71fbec80c8c080fa661354f Mon Sep 17 00:00:00 2001
+From 6ca5e252c7d392ef0a6decb08f8bc324472cf29f Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Thu, 1 Oct 2026 04:52:59 +0800
 Subject: [PATCH 04/16] gugu: mark a usage_update whose context window is still
@@ -28,7 +28,7 @@ Drop when: upstream reports on usage_update whether `size` is confirmed.
  2 files changed, 97 insertions(+), 4 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 60c7dc5..5e4ab63 100644
+index db7bc33..8b2f20a 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -4986,7 +4986,10 @@ export class ClaudeAcpAgent {

@@ -1,4 +1,4 @@
-From 5efb32d657ca4a9de916dfd8ba4292c86eb65eeb Mon Sep 17 00:00:00 2001
+From ee7ed4d6645398b3648827a0795e0a95bd0b49a6 Mon Sep 17 00:00:00 2001
 From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 19:26:55 +0800
 Subject: [PATCH 06/16] Preserve streamed text on a repeated start of the same
@@ -20,7 +20,7 @@ of the same API message and includes equivalent regression coverage.
  2 files changed, 39 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 6cfb959..8eec3e1 100644
+index d04c220..e1e3d8c 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -4711,6 +4711,7 @@ export class ClaudeAcpAgent {

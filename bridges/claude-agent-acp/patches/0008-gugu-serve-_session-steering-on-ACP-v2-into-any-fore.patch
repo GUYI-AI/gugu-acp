@@ -1,4 +1,4 @@
-From 50a184823f2946b23d2c838ccbd91d404947eb68 Mon Sep 17 00:00:00 2001
+From 84c505b834797c4f160c583f8a4fe9f70ab27a05 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:16:17 -0700
 Subject: [PATCH 08/16] gugu: serve _session/steering on ACP v2, into any
@@ -76,7 +76,7 @@ Claude Code started on its own.
  44 files changed, 208 insertions(+), 74 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index fd2c2bf..08c0962 100644
+index cbfb41a..2a07d20 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -699,7 +699,7 @@ const TURN_NO_RESULT_MESSAGE =

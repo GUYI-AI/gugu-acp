@@ -1,4 +1,4 @@
-From 6bea67c4c6a4e69ad3667c4ef78bfef8422a0abc Mon Sep 17 00:00:00 2001
+From ad94320f30ec9582a5c2c40a23405b0264ff10d1 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Sun, 25 Oct 2026 02:38:13 +0000
 Subject: [PATCH 12/16] Start autonomous foreground work at the CLI request
@@ -15,7 +15,7 @@ Drop when: upstream starts autonomous foreground work at the native request boun
  2 files changed, 194 insertions(+), 12 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 2d2d859..96bf006 100644
+index 314c7b6..eceeba6 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -1576,6 +1576,8 @@ export type Session = {
@@ -37,7 +37,7 @@ index 2d2d859..96bf006 100644
                  // The task settled — no further tool calls can originate
                  // from it, so its registry entry can be dropped.
                  await subagents.finishTask(
-@@ -10384,15 +10389,20 @@ export class ClaudeAcpAgent {
+@@ -10392,15 +10397,20 @@ export class ClaudeAcpAgent {
    }
  
    /** Start a model cycle that Claude Code started on its own as the foreground
@@ -63,7 +63,7 @@ index 2d2d859..96bf006 100644
      // A turn that Claude Code started is the foreground work already. Without
      // lifecycle frames, a queued turn's output can come before its echo, so
      // output while a turn is queued may be that turn's. With them, a turn that
-@@ -10400,7 +10410,9 @@ export class ClaudeAcpAgent {
+@@ -10408,7 +10418,9 @@ export class ClaudeAcpAgent {
      const queued = (session.turnQueue ?? []).some(
        (turn) => !turn.settled && turn !== session.activeTurn,
      );
@@ -74,7 +74,7 @@ index 2d2d859..96bf006 100644
      this.startForeground(sessionId, AUTONOMOUS_CYCLE);
    }
  
-@@ -10416,11 +10428,12 @@ export class ClaudeAcpAgent {
+@@ -10424,11 +10436,12 @@ export class ClaudeAcpAgent {
        : !session.activeTurn && !this.runsAutonomousCycle(sessionId);
    }
  

@@ -1,4 +1,4 @@
-From 80b38441eb0bc0b95478c35a8e92e6471d3e9d6a Mon Sep 17 00:00:00 2001
+From 9d474c198056be12e04a94f5b0415a14d27805a7 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:16:48 -0700
 Subject: [PATCH 09/16] gugu: serve the async tasks extension on ACP v2
@@ -22,7 +22,9 @@ had no way to see or stop a background command: v2 has subagent sessions
 
 Upstream: none yet.
 
-Drop when: upstream offers background task control on v2.
+Drop when: Gugu's client lists and stops background commands through
+upstream's v2 background work (`backgroundWork`: `terminal/cancel`,
+`toolCall/cancel`, as of v0.101.0) instead of `_session/async_task/*`.
 ---
  src/acp-agent.ts              | 17 +++++++-----
  src/async-tasks.ts            | 17 ++++++++++--
@@ -33,7 +35,7 @@ Drop when: upstream offers background task control on v2.
  6 files changed, 103 insertions(+), 13 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 08c0962..2d2d859 100644
+index 2a07d20..314c7b6 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -702,18 +702,18 @@ const TURN_NO_RESULT_MESSAGE =
@@ -86,7 +88,7 @@ index 08c0962..2d2d859 100644
                    asyncTasks.enabled &&
                    message.state === "running" &&
                    previousState !== "running" &&
-@@ -9896,7 +9899,7 @@ export class ClaudeAcpAgent {
+@@ -9904,7 +9907,7 @@ export class ClaudeAcpAgent {
      // comes later and needs the tool use that started the task.
      const replayToolUses = new Map<string, { name: string; input: unknown; sessionId: string }>();
      const replayAsyncTasks = new AsyncTaskRuntime(
@@ -95,7 +97,7 @@ index 08c0962..2d2d859 100644
        sessionId,
        async (notification) => this.client.sessionUpdate(asSdkSessionNotification(notification)),
        {
-@@ -12802,7 +12805,7 @@ export class ClaudeAcpAgent {
+@@ -12861,7 +12864,7 @@ export class ClaudeAcpAgent {
          stopsWorkflowsOnCancel:
            options.perTaskStopAffordance === true &&
            !this.backgroundWork.enabled &&

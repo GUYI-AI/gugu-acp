@@ -1,4 +1,4 @@
-From feb6d2fc9cb0c316c7f8fbb6a193dc9591d5439c Mon Sep 17 00:00:00 2001
+From fb21ddcacd609e2306d0547a347d75f9e8433b43 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 22 Oct 2026 10:04:11 -0700
 Subject: [PATCH 10/16] gugu: a fork keeps the subagent history of its source
