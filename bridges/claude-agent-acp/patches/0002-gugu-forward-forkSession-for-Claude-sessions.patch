@@ -1,7 +1,7 @@
-From c617c36fb94b70e0a77bb7c9bb4c2cc869a2765b Mon Sep 17 00:00:00 2001
+From a0426f549c5a11a3447d95b01cce9c56d19e3b20 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Wed, 9 Sep 2026 01:50:37 +0800
-Subject: [PATCH 02/14] gugu: forward forkSession for Claude sessions
+Subject: [PATCH 02/16] gugu: forward forkSession for Claude sessions
 
 Why: newSession() receives `_meta.claudeCode.options.forkSession` but drops
 it, so Gugu's runtime fork (resume + fork, nothing written to disk) silently
@@ -31,10 +31,10 @@ rebased on.
  3 files changed, 55 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 81ce932..745e777 100644
+index d2d41de..d2b3f26 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -3045,9 +3045,10 @@ export class ClaudeAcpAgent {
+@@ -3149,9 +3149,10 @@ export class ClaudeAcpAgent {
  
    async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
      while (this.providerUpdate) await this.providerUpdate;
@@ -48,10 +48,10 @@ index 81ce932..745e777 100644
      this.afterSetupResponse(response.sessionId, params.mcpServers);
      return response;
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 9dca098..0ffca72 100644
+index a896242..c2db5fb 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -387,6 +387,42 @@ describe("task plan lifecycle", () => {
+@@ -391,6 +391,42 @@ describe("task plan lifecycle", () => {
    });
  });
  
@@ -95,10 +95,10 @@ index 9dca098..0ffca72 100644
    let child: ReturnType<typeof spawn>;
  
 diff --git a/src/tests/create-session-options.test.ts b/src/tests/create-session-options.test.ts
-index 627e181..24a2e45 100644
+index eac6fe5..c4c4c6c 100644
 --- a/src/tests/create-session-options.test.ts
 +++ b/src/tests/create-session-options.test.ts
-@@ -122,6 +122,22 @@ describe("createSession options merging", () => {
+@@ -123,6 +123,22 @@ describe("createSession options merging", () => {
      agent = new ClaudeAcpAgent(createMockClient());
    });
  

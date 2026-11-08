@@ -1,8 +1,8 @@
-From 8b0bbc6b3ce8014df19a6a3c1060186f2a4dc7e3 Mon Sep 17 00:00:00 2001
+From 88e8b77b058c87fbcebc3ef012712e2a490b9f75 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Sat, 7 Nov 2026 18:02:38 -0500
-Subject: [PATCH] gugu: an unknown model id is rejected, not matched to a row
- containing one of its letters
+Subject: [PATCH 16/16] gugu: an unknown model id is rejected, not matched to a
+ row containing one of its letters
 
 Why: resolveModelPreference's last tier scored a row by substring hits of any one token, so `claude-not-a-model-9` (tokens "not", "a", "model") matched "deepseek-v4-flash" on the letter "a"; set_config_option then switched to it and acknowledged success. The tier now requires every token to be a whole word of the row's value or display name. Bare ids against a "[1m]"-spelled row, family aliases (opus, opusplan, haiku) and display names resolve as before; an id nothing matches throws "Invalid value for config option model".
 
@@ -16,7 +16,7 @@ Drop when: upstream's token tier no longer accepts a partial or substring match.
  3 files changed, 80 insertions(+), 2 deletions(-)
 
 diff --git a/src/session-model.ts b/src/session-model.ts
-index 2baf738..f7c301b 100644
+index 5da5ecc..9020dc4 100644
 --- a/src/session-model.ts
 +++ b/src/session-model.ts
 @@ -102,11 +102,17 @@ function tokenizeModelPreference(model: string): { tokens: string[]; contextHint
@@ -40,10 +40,10 @@ index 2baf738..f7c301b 100644
      score += token === contextHint ? 3 : 1;
    }
 diff --git a/src/tests/model-resolution.test.ts b/src/tests/model-resolution.test.ts
-index 17f0b3c..49b3528 100644
+index 95556df..fc5d6fe 100644
 --- a/src/tests/model-resolution.test.ts
 +++ b/src/tests/model-resolution.test.ts
-@@ -40,6 +40,49 @@ const LIVE_SHAPED_MODELS: ModelInfo[] = [
+@@ -42,6 +42,49 @@ const LIVE_SHAPED_MODELS: ModelInfo[] = [
    },
  ];
  
@@ -94,11 +94,11 @@ index 17f0b3c..49b3528 100644
    it("matches a preference that equals an alias's resolvedModel exactly", () => {
      expect(resolveModelPreference(LIVE_SHAPED_MODELS, "claude-sonnet-5")?.value).toBe("sonnet");
 diff --git a/src/tests/session-config-options.test.ts b/src/tests/session-config-options.test.ts
-index 2231957..98cb387 100644
+index 56b6a85..47a96b9 100644
 --- a/src/tests/session-config-options.test.ts
 +++ b/src/tests/session-config-options.test.ts
-@@ -334,6 +334,35 @@ describe("session config options", () => {
-       ).rejects.toThrow("Invalid value for config option model: gpt-4");
+@@ -358,6 +358,35 @@ describe("session config options", () => {
+       await expect(agent.closeSession({ sessionId: "nonexistent" })).resolves.toEqual({});
      });
  
 +    it("rejects an unknown model id instead of switching to a loosely matching row", async () => {

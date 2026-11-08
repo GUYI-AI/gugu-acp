@@ -1,7 +1,7 @@
-From c75315c001f1a522f21dc5a0908f7e3ce447eef4 Mon Sep 17 00:00:00 2001
+From fb21ddcacd609e2306d0547a347d75f9e8433b43 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <shuxue@protonmail.com>
 Date: Thu, 22 Oct 2026 10:04:11 -0700
-Subject: [PATCH 10/14] gugu: a fork keeps the subagent history of its source
+Subject: [PATCH 10/16] gugu: a fork keeps the subagent history of its source
 
 The SDK fork copies only the session transcript, not the
 <session>/subagents folder beside it. On ACP v2 the replay of a session
@@ -17,7 +17,7 @@ the subagent and its end, as a load of the source does.
  3 files changed, 76 insertions(+), 3 deletions(-)
 
 diff --git a/src/fork-session.ts b/src/fork-session.ts
-index af0ae53..8c388fc 100644
+index e4bd5f1..75247af 100644
 --- a/src/fork-session.ts
 +++ b/src/fork-session.ts
 @@ -13,6 +13,7 @@ import {
@@ -28,15 +28,15 @@ index af0ae53..8c388fc 100644
  
  type ForkSessionMeta = {
    [key: string]: unknown;
-@@ -188,6 +189,7 @@ export async function forkSession(
+@@ -215,6 +216,7 @@ async function forkTranscript(
    if (!point) {
-     const forked = await forkClaudeSession(params.sessionId, { dir: params.cwd });
+     const forked = await forkClaudeSession(params.sessionId);
      timing.phase("sdk-fork", " resolution=latest");
 +    await copySubagentHistory(params.sessionId, forked.sessionId);
      return { sessionId: forked.sessionId };
    }
  
-@@ -235,5 +237,6 @@ export async function forkSession(
+@@ -259,5 +261,6 @@ async function forkTranscript(
      upToMessageId: messageUuid ?? fullHistoryUuid,
    });
    timing.phase("sdk-fork");
@@ -44,7 +44,7 @@ index af0ae53..8c388fc 100644
    return { sessionId: forked.sessionId };
  }
 diff --git a/src/subagent-history.ts b/src/subagent-history.ts
-index d807ab7..72df7d8 100644
+index 063f432..695935f 100644
 --- a/src/subagent-history.ts
 +++ b/src/subagent-history.ts
 @@ -4,7 +4,7 @@ import {
@@ -56,8 +56,8 @@ index d807ab7..72df7d8 100644
  import path from "node:path";
  import readline from "node:readline";
  import { isNativeSubagentControlTool, type HistoricalSubagent } from "./native-subagents.js";
-@@ -87,6 +87,30 @@ export async function subagentHistory(sessionId: string): Promise<SubagentHistor
-   return dir ? { agents, dir } : { agents };
+@@ -126,6 +126,30 @@ async function recordedCwd(file: string): Promise<string | undefined> {
+   return undefined;
  }
  
 +/**

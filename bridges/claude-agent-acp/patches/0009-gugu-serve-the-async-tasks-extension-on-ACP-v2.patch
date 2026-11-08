@@ -1,7 +1,7 @@
-From ed56af33b6624c0554695d5440e99b083ffa5a2c Mon Sep 17 00:00:00 2001
+From 9d474c198056be12e04a94f5b0415a14d27805a7 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:16:48 -0700
-Subject: [PATCH 09/14] gugu: serve the async tasks extension on ACP v2
+Subject: [PATCH 09/16] gugu: serve the async tasks extension on ACP v2
 
 Why: Gugu lists a session's background commands and stops one on its own
 (`_session/async_task/stop`), without stopping the turn. That lifecycle is the
@@ -22,7 +22,9 @@ had no way to see or stop a background command: v2 has subagent sessions
 
 Upstream: none yet.
 
-Drop when: upstream offers background task control on v2.
+Drop when: Gugu's client lists and stops background commands through
+upstream's v2 background work (`backgroundWork`: `terminal/cancel`,
+`toolCall/cancel`, as of v0.101.0) instead of `_session/async_task/*`.
 ---
  src/acp-agent.ts              | 17 +++++++-----
  src/async-tasks.ts            | 17 ++++++++++--
@@ -33,10 +35,10 @@ Drop when: upstream offers background task control on v2.
  6 files changed, 103 insertions(+), 13 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 9d93a75..28d98d8 100644
+index 2a07d20..314c7b6 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -663,18 +663,18 @@ const TURN_NO_RESULT_MESSAGE =
+@@ -702,18 +702,18 @@ const TURN_NO_RESULT_MESSAGE =
  export const STEER_METHOD = "_session/steering";
  
  /** Stops one Claude background task without cancelling the parent prompt turn. */
@@ -59,7 +61,7 @@ index 9d93a75..28d98d8 100644
    if (!value || typeof value !== "object" || Array.isArray(value)) {
      throw RequestError.invalidParams(undefined, "async task stop params must be an object");
    }
-@@ -4583,7 +4583,7 @@ export class ClaudeAcpAgent {
+@@ -4796,7 +4796,7 @@ export class ClaudeAcpAgent {
       *  update, so only the first becomes one. */
      const noticedToolUses = new Set<string>();
      const asyncTasks = (session.asyncTaskRuntime ??= new AsyncTaskRuntime(
@@ -68,7 +70,7 @@ index 9d93a75..28d98d8 100644
        params.sessionId,
        async (notification) => this.client.sessionUpdate(asSdkSessionNotification(notification)),
        {
-@@ -6038,7 +6038,9 @@ export class ClaudeAcpAgent {
+@@ -6245,7 +6245,9 @@ export class ClaudeAcpAgent {
          // From CLI 2.1.270 the state stays `running` while background agents
          // run, so a turn that their notification starts has no `running`
          // transition. Its first output with no prompt open starts its task.
@@ -78,7 +80,7 @@ index 9d93a75..28d98d8 100644
            asyncTasks.enabled &&
            !asyncTasks.autonomousTurnOpen &&
            (message.type === "assistant" || message.type === "stream_event") &&
-@@ -6202,6 +6204,7 @@ export class ClaudeAcpAgent {
+@@ -6430,6 +6432,7 @@ export class ClaudeAcpAgent {
                  // its own, for example for a task notification. The client
                  // sees it as an async task (see autonomousTurnStarted).
                  if (
@@ -86,7 +88,7 @@ index 9d93a75..28d98d8 100644
                    asyncTasks.enabled &&
                    message.state === "running" &&
                    previousState !== "running" &&
-@@ -9474,7 +9477,7 @@ export class ClaudeAcpAgent {
+@@ -9904,7 +9907,7 @@ export class ClaudeAcpAgent {
      // comes later and needs the tool use that started the task.
      const replayToolUses = new Map<string, { name: string; input: unknown; sessionId: string }>();
      const replayAsyncTasks = new AsyncTaskRuntime(
@@ -95,20 +97,20 @@ index 9d93a75..28d98d8 100644
        sessionId,
        async (notification) => this.client.sessionUpdate(asSdkSessionNotification(notification)),
        {
-@@ -12034,7 +12037,7 @@ export class ClaudeAcpAgent {
-         liveBackgroundTasks: new Map(),
+@@ -12861,7 +12864,7 @@ export class ClaudeAcpAgent {
          stopsWorkflowsOnCancel:
            options.perTaskStopAffordance === true &&
+           !this.backgroundWork.enabled &&
 -          !clientSupportsAsyncTasks(this.clientCapabilities),
 +          !clientSupportsAsyncTasks(this.clientCapabilities, this.v2),
          nativeSubagentsByTaskId: new Map(),
          nativeSubagentTaskIdByToolUseId: new Map(),
          nativeSubagentParentByToolUseId: new Map(),
 diff --git a/src/async-tasks.ts b/src/async-tasks.ts
-index 3c390dc..93378f4 100644
+index ee58014..d2abc3c 100644
 --- a/src/async-tasks.ts
 +++ b/src/async-tasks.ts
-@@ -109,8 +109,21 @@ type BackgroundTaskLevel = TaskIdentity & {
+@@ -111,8 +111,21 @@ type BackgroundTaskLevel = TaskIdentity & {
    description?: unknown;
  };
  
@@ -133,10 +135,10 @@ index 3c390dc..93378f4 100644
  
  /** Publishes Claude's non-agent background work as a separate AIR task lifecycle. */
 diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
-index 76e6e85..dc07bab 100644
+index 8107085..6c63330 100644
 --- a/src/tests/acp-v2.test.ts
 +++ b/src/tests/acp-v2.test.ts
-@@ -5599,4 +5599,55 @@ describe("ACP v2 extensions", () => {
+@@ -6992,4 +6992,55 @@ describe("ACP v2 extensions", () => {
        "idle end_turn",
      ]);
    });
@@ -193,7 +195,7 @@ index 76e6e85..dc07bab 100644
 +  });
  });
 diff --git a/src/tests/async-tasks.test.ts b/src/tests/async-tasks.test.ts
-index e0f1c32..3654fc4 100644
+index 4207c3f..bf8b546 100644
 --- a/src/tests/async-tasks.test.ts
 +++ b/src/tests/async-tasks.test.ts
 @@ -600,11 +600,18 @@ describe("AsyncTaskRuntime", () => {
@@ -220,10 +222,10 @@ index e0f1c32..3654fc4 100644
  
    it("publishes one durable lifecycle with progress and a terminal state", async () => {
 diff --git a/src/v2/agent.ts b/src/v2/agent.ts
-index f163584..e6b7ea9 100644
+index e517cca..05d2803 100644
 --- a/src/v2/agent.ts
 +++ b/src/v2/agent.ts
-@@ -15,10 +15,14 @@ import type {
+@@ -16,10 +16,14 @@ import type {
  } from "@agentclientprotocol/sdk/unstable";
  import * as v2 from "@agentclientprotocol/sdk/experimental/v2/unstable";
  import {
@@ -238,7 +240,7 @@ index f163584..e6b7ea9 100644
    type Logger,
    type SteerRequest,
    type SteerResponse,
-@@ -142,6 +146,11 @@ export function v2AgentApp(
+@@ -198,6 +202,11 @@ export function v2AgentApp(
        STEER_METHOD,
        { parse: parseSteerRequest },
        ({ params }) => v2Steer(agent, params),

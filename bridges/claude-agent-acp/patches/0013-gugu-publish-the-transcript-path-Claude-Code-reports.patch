@@ -1,7 +1,7 @@
-From 14302db8683b8959c31a0915e0d3f5db0bcaf571 Mon Sep 17 00:00:00 2001
+From 3a8317cdfbf9a002a66b1d6a7bb5a45b3e0130bb Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 18:59:30 -0700
-Subject: [PATCH 13/14] gugu: publish the transcript path Claude Code reports
+Subject: [PATCH 13/16] gugu: publish the transcript path Claude Code reports
 
 Why: a `claude` wrapper may set CLAUDE_CONFIG_DIR inside its own process.
 Claude Code then writes its session records under that directory, but neither
@@ -26,19 +26,19 @@ directory) to the client by itself.
  create mode 100644 src/tests/transcript-path.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 39e8a3f..891eb2b 100644
+index eceeba6..f238d74 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -11316,6 +11316,8 @@ export class ClaudeAcpAgent {
+@@ -12095,6 +12095,8 @@ export class ClaudeAcpAgent {
      // launch" error from the SDK (see issue #749).
-     await this.validateCwd(params.cwd);
+     await this.validateCwd(params.cwd, params.additionalDirectories);
      const clientPrompt = clientSystemPrompt(params.systemPrompt);
 +    // The last transcript path published for this session (see the UserPromptSubmit hook).
 +    let publishedTranscriptPath: string | undefined;
  
      // We want to create a new session id unless it is resume,
      // but not resume + forkSession.
-@@ -11723,6 +11725,39 @@ export class ClaudeAcpAgent {
+@@ -12510,6 +12512,39 @@ export class ClaudeAcpAgent {
              ],
            },
          ],

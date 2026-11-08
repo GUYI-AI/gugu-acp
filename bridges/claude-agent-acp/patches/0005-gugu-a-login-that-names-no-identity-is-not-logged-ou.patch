@@ -1,7 +1,7 @@
-From ec7206d629296b2c20fde0672483318c7fafa9d2 Mon Sep 17 00:00:00 2001
+From dd1aa97521d0a4e625f4ffcd4fa302821f074fe7 Mon Sep 17 00:00:00 2001
 From: gugu-acp <gugu-acp@users.noreply.github.com>
 Date: Wed, 21 Oct 2026 20:02:29 -0700
-Subject: [PATCH 05/14] gugu: a login that names no identity is not "logged
+Subject: [PATCH 05/16] gugu: a login that names no identity is not "logged
  out"
 
 Why: `claude auth status --json` for a bearer token, `ANTHROPIC_AUTH_TOKEN`
@@ -30,10 +30,10 @@ key source to `none`.
  3 files changed, 29 insertions(+), 5 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 693ef52..42387c6 100644
+index 8b2f20a..d04c220 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -3459,7 +3459,7 @@ export class ClaudeAcpAgent {
+@@ -3585,7 +3585,7 @@ export class ClaudeAcpAgent {
        }
      }
      if (!status) {
@@ -81,10 +81,10 @@ index 7ce775a..b8842f8 100644
  
  /** Names the plan with exactly one "Claude". A newer CLI already reports
 diff --git a/src/tests/auth-status.test.ts b/src/tests/auth-status.test.ts
-index 2265a21..aa9758f 100644
+index b59398b..891aade 100644
 --- a/src/tests/auth-status.test.ts
 +++ b/src/tests/auth-status.test.ts
-@@ -83,6 +83,14 @@ const CLI_BEDROCK = JSON.stringify({
+@@ -88,6 +88,14 @@ const CLI_BEDROCK = JSON.stringify({
    authMethod: "none",
    apiProvider: "bedrock",
  });
@@ -99,7 +99,7 @@ index 2265a21..aa9758f 100644
  
  const MOCK_MODELS = [
    { value: "id", displayName: "name", description: "description", supportsAutoMode: true },
-@@ -307,6 +315,10 @@ describe("auth status mappers", () => {
+@@ -312,6 +320,10 @@ describe("auth status mappers", () => {
      expect(fromCliStatus(CLI_BEDROCK)).toEqual({ kind: "external", label: "AWS Bedrock" });
    });
  
@@ -110,7 +110,7 @@ index 2265a21..aa9758f 100644
    it("reports unparseable CLI output as not known", () => {
      expect(fromCliStatus("")).toBeUndefined();
      expect(fromCliStatus("Usage: claude auth status")).toBeUndefined();
-@@ -594,6 +606,13 @@ describe("auth status over ACP", () => {
+@@ -599,6 +611,13 @@ describe("auth status over ACP", () => {
      expect(agent.currentAuthStatus).toBeUndefined();
    });
  

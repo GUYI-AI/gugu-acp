@@ -1,7 +1,7 @@
-From 05924ee173f41162928f78506e3a11b29bbce7ec Mon Sep 17 00:00:00 2001
+From ea1d94fd8eed8a1287a3eb82f10cb8df6717d7a3 Mon Sep 17 00:00:00 2001
 From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 19:26:55 +0800
-Subject: [PATCH 07/14] Preserve Gugu's opt-in incremental MCP argument
+Subject: [PATCH 07/16] Preserve Gugu's opt-in incremental MCP argument
  previews
 
 Why: Gugu already ships this behavior for #7536 as a dependency patch.
@@ -22,7 +22,7 @@ including AIR clients, with equivalent split-escape regression tests.
  create mode 100644 src/tests/partial-mcp-input.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 3e2ff9b..cb00539 100644
+index e1e3d8c..cbfb41a 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -1,3 +1,4 @@
@@ -30,7 +30,7 @@ index 3e2ff9b..cb00539 100644
  import {
    agent as acpAgent,
    AgentApp,
-@@ -13798,11 +13799,12 @@ export function streamEventToAcpNotifications(
+@@ -14858,11 +14859,12 @@ export function streamEventToAcpNotifications(
            if (inputsForMessage?.size === 0) streamedToolInputs?.delete(streamKey);
            return [];
          }
@@ -118,10 +118,10 @@ index 9199a04..d2cdaf3 100644
    }
  }
 diff --git a/src/tool-calls/renderer.ts b/src/tool-calls/renderer.ts
-index 1afa13b..395b74e 100644
+index 6001dfe..81f64f2 100644
 --- a/src/tool-calls/renderer.ts
 +++ b/src/tool-calls/renderer.ts
-@@ -282,8 +282,8 @@ export class AcpToolCallRenderer {
+@@ -283,8 +283,8 @@ export class AcpToolCallRenderer {
     * The report of a tool call from the complete top-level fields of its still
     * streaming input. It carries no content: content built from partial input
     * is misleading (an Edit without its `new_string` renders as a deletion) or
@@ -132,7 +132,7 @@ index 1afa13b..395b74e 100644
     */
    partialRefinement(toolUse: Pick<ToolUse, "id" | "name">, input: unknown, cwd?: string) {
      const facts = this.facts({ name: toolUse.name, input }, cwd);
-@@ -291,7 +291,7 @@ export class AcpToolCallRenderer {
+@@ -292,7 +292,7 @@ export class AcpToolCallRenderer {
        _meta: this.toolUseMeta({ name: toolUse.name, input }, cwd),
        toolCallId: toolUse.id,
        sessionUpdate: "tool_call_update",
