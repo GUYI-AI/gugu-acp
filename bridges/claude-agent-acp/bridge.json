@@ -1,12 +1,12 @@
 {
   "package": "@gugu-acp/claude-agent-acp",
-  "version": "1.6.3",
+  "version": "1.7.0",
   "compat": "claude-agent-acp-v2",
   "upstream": {
     "repo": "https://github.com/agentclientprotocol/claude-agent-acp",
     "package": "@agentclientprotocol/claude-agent-acp",
-    "tag": "v0.95.0",
-    "commit": "ebfbfbdaa9c2a6a8bd9eb0a4965b521009152350"
+    "tag": "v0.101.0",
+    "commit": "85aec26ef984a421fe8064ce43f60138a3372384"
   },
   "cli": {
     "name": "claude",

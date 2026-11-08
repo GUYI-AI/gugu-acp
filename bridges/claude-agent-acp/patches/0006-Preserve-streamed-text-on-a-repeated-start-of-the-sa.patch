@@ -1,7 +1,7 @@
-From cd8404db75522b0c38a3aef543aa60af70baee77 Mon Sep 17 00:00:00 2001
+From 5efb32d657ca4a9de916dfd8ba4292c86eb65eeb Mon Sep 17 00:00:00 2001
 From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
 Date: Tue, 20 Oct 2026 19:26:55 +0800
-Subject: [PATCH 06/14] Preserve streamed text on a repeated start of the same
+Subject: [PATCH 06/16] Preserve streamed text on a repeated start of the same
  message
 
 Why: Claude Code 2.1.304 with a gateway can emit another message_start for
@@ -20,10 +20,10 @@ of the same API message and includes equivalent regression coverage.
  2 files changed, 39 insertions(+), 2 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 42387c6..3e2ff9b 100644
+index 6cfb959..8eec3e1 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -4499,6 +4499,7 @@ export class ClaudeAcpAgent {
+@@ -4711,6 +4711,7 @@ export class ClaudeAcpAgent {
      // subagent message gets the same remainder diff as a top-level message.
      // The entry of a subagent goes when the subagent finishes.
      const streamedBlocksByParent = new Map<string, StreamedBlock[]>();
@@ -31,23 +31,23 @@ index 42387c6..3e2ff9b 100644
      const streamedBlocksOf = (parentToolUseId: string | null): StreamedBlock[] => {
        const key = parentToolUseId ?? "";
        let blocks = streamedBlocksByParent.get(key);
-@@ -6620,6 +6621,7 @@ export class ClaudeAcpAgent {
+@@ -6864,6 +6865,7 @@ export class ClaudeAcpAgent {
                    // The subagent streams no more text under this parent.
                    streamedBlocksByParent.delete(message.tool_use_id);
                    droppedStreams.delete(message.tool_use_id);
 +                  streamMessageIdsByParent.delete(message.tool_use_id);
                  }
-                 await endBackgroundTerminal(message.task_id);
+                 await endBackgroundTask(message.task_id, message.status);
                  if (message.status === "stopped") {
-@@ -6665,6 +6667,7 @@ export class ClaudeAcpAgent {
+@@ -6909,6 +6911,7 @@ export class ClaudeAcpAgent {
                    if (parentToolUseId) {
                      streamedBlocksByParent.delete(parentToolUseId);
                      droppedStreams.delete(parentToolUseId);
 +                    streamMessageIdsByParent.delete(parentToolUseId);
                    }
-                   await endBackgroundTerminal(message.task_id);
-                   if (message.patch.status === "killed") {
-@@ -7690,8 +7693,23 @@ export class ClaudeAcpAgent {
+                   await endBackgroundTask(
+                     message.task_id,
+@@ -7944,8 +7947,23 @@ export class ClaudeAcpAgent {
                // doesn't disturb the mid-message turn-activation path the way
                // resetting on turn activation would. The record's drop latch
                // (see below) resets with it.
@@ -74,10 +74,10 @@ index 42387c6..3e2ff9b 100644
              if (
                message.parent_tool_use_id === null &&
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 16024dd..6dd34dd 100644
+index e7dc8a4..872263a 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
-@@ -15936,6 +15936,25 @@ describe("assembled assistant text fallback", () => {
+@@ -17494,6 +17494,25 @@ describe("assembled assistant text fallback", () => {
      expect(messageChunkTexts(updates)).toEqual(["hello ", "world"]);
    });
  

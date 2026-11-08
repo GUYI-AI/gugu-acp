@@ -1,7 +1,7 @@
-From d3afc4a3e1ce3627a75a890d466e17189c88986f Mon Sep 17 00:00:00 2001
+From 9d9362aeae9b7b42d719fb60bcf284c59ef8c624 Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Wed, 28 Oct 2026 18:59:53 -0700
-Subject: [PATCH 14/14] gugu: the adapter's own lookups use the config dir
+Subject: [PATCH 14/16] gugu: the adapter's own lookups use the config dir
  Claude Code reported
 
 Why: claudeConfigDir() read the adapter's own CLAUDE_CONFIG_DIR, else
@@ -28,10 +28,10 @@ itself, or the CLI exposes it to SDK clients.
  create mode 100644 src/tests/paths.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 891eb2b..925463a 100644
+index 52b8f11..009ef82 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -221,6 +221,7 @@ import {
+@@ -242,6 +242,7 @@ import {
  } from "./permissions/presentation.js";
  import { decodeClaudePermissionResponse } from "./permissions/response.js";
  import { SettingsManager } from "./settings.js";
@@ -39,7 +39,7 @@ index 891eb2b..925463a 100644
  import {
    activeUsageLimitMessage,
    airSessionFailureCapabilityMeta,
-@@ -11728,8 +11729,8 @@ export class ClaudeAcpAgent {
+@@ -12465,8 +12466,8 @@ export class ClaudeAcpAgent {
          // The transcript path in hook input is the only place the configuration
          // directory the CLI actually uses shows: a `claude` wrapper may set
          // CLAUDE_CONFIG_DIR inside its own process, out of sight of this adapter
@@ -50,7 +50,7 @@ index 891eb2b..925463a 100644
          // changes (the first prompt, and after /clear starts a new transcript).
          // This hook fires only once the session exists for the client.
          UserPromptSubmit: [
-@@ -11740,6 +11741,7 @@ export class ClaudeAcpAgent {
+@@ -12477,6 +12478,7 @@ export class ClaudeAcpAgent {
                  const transcriptPath = input.transcript_path;
                  if (transcriptPath && transcriptPath !== publishedTranscriptPath) {
                    publishedTranscriptPath = transcriptPath;

@@ -1,7 +1,7 @@
-From 0d9c1b1cf3daac10bdd029d35d48a7b7ce0a149a Mon Sep 17 00:00:00 2001
+From ff6586415f10f66c57e135cb6ac675dcf39c8146 Mon Sep 17 00:00:00 2001
 From: Yang YiHe <108562510+nmhjklnm@users.noreply.github.com>
 Date: Fri, 30 Oct 2026 05:07:52 +0800
-Subject: [PATCH] gugu: forward native blocking Stop hook notices
+Subject: [PATCH 15/16] gugu: forward native blocking Stop hook notices
 
 Why: decision/reason-only Stop command hooks resume the model without an informational frame. Enable native lifecycle events and forward successful blocking responses through ACP notices, including autonomous cycles without a prompted Turn. Keep native systemMessage output on its existing lane, ignore terminal continue:false, and never infer hooks from assistant prose.
 
@@ -18,10 +18,10 @@ Drop when: upstream enables and forwards blocking Stop responses through ACP not
  create mode 100644 src/tests/stop-hook-notice.test.ts
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 925463a..93d6a72 100644
+index 009ef82..55686ce 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -222,6 +222,7 @@ import {
+@@ -243,6 +243,7 @@ import {
  import { decodeClaudePermissionResponse } from "./permissions/response.js";
  import { SettingsManager } from "./settings.js";
  import { noteTranscriptPath } from "./paths.js";
@@ -29,7 +29,7 @@ index 925463a..93d6a72 100644
  import {
    activeUsageLimitMessage,
    airSessionFailureCapabilityMeta,
-@@ -813,6 +814,8 @@ type Turn = {
+@@ -860,6 +861,8 @@ type Turn = {
     *  queue head, not `activeTurn`: a UserPromptSubmit block arrives before
     *  any echo, so the turn is only promoted when its result lands. */
    noticeTexts?: string[];
@@ -38,7 +38,7 @@ index 925463a..93d6a72 100644
    /** Structured presentation for an exact /usage or /mcp command. The command
     * still runs through the normal SDK turn so ordering, cancellation,
     * persistence, and replay remain unchanged. A null result means the request
-@@ -1035,6 +1038,8 @@ export type Session = {
+@@ -1082,6 +1085,8 @@ export type Session = {
    /** The turn whose messages the consumer is currently attributing output to
     *  (the head of `turnQueue` once its user message has been echoed). */
    activeTurn?: Turn | null;
@@ -47,7 +47,7 @@ index 925463a..93d6a72 100644
    /** Session-owned native checkpoint reporter. Turn state stays on each Turn. */
    fileChangeReporter?: NativeFileChangeReporter;
    /** Optimistic goal state published for a submitted `/goal` command whose
-@@ -6533,9 +6538,29 @@ export class ClaudeAcpAgent {
+@@ -6777,9 +6782,29 @@ export class ClaudeAcpAgent {
                }
                case "hook_started":
                case "hook_progress":
@@ -78,7 +78,7 @@ index 925463a..93d6a72 100644
                case "task_progress":
                  if (isLateTaskRun(session, message.task_id, message.run_id)) {
                    this.logger.log(
-@@ -11576,6 +11601,9 @@ export class ClaudeAcpAgent {
+@@ -12313,6 +12338,9 @@ export class ClaudeAcpAgent {
        // Before `userProvidedOptions`, so a client that passes
        // `promptSuggestions: false` keeps it off.
        promptSuggestions: true,
@@ -129,10 +129,10 @@ index 0000000..6739dc2
 +    .join("\n");
 +}
 diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
-index ec15950..3266088 100644
+index ed8c6cd..a4952fc 100644
 --- a/src/tests/acp-v2.test.ts
 +++ b/src/tests/acp-v2.test.ts
-@@ -2390,6 +2390,40 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
+@@ -2854,6 +2854,40 @@ describe("ACP v2 model cycles that Claude Code starts on its own", () => {
      uuid: randomUUID(), session_id: options.sessionId,
    });
  
@@ -394,5 +394,5 @@ index 0000000..b86ab87
 +  });
 +});
 -- 
-2.44.0
+2.43.0
 
