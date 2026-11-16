@@ -1,0 +1,277 @@
+From 395092d2a7c8357aa1a377b9966cfc5415237679 Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Mon, 16 Nov 2026 23:20:20 +0000
+Subject: [PATCH] gugu: step a conversation back to before one of its prompts
+ (_session/revert)
+
+Why: a turn the model service refuses stays in the conversation, so every
+later turn is refused with it and the session is lost. Gugu offers
+"rewind and edit" on a user message (gugu#7304): the bridge must cut the
+conversation back to before that prompt, in place, and continue from there.
+The prompt receipt and the replay give each prompt its revert point (the
+prompt uuid). _session/revert {sessionId, before, files?} restarts the query
+with resume + resumeSessionAt at the last chain entry before the prompt,
+under the same session id; files: "restore" first restores the files Claude
+edited from that prompt on (Query.rewindFiles; checkpointing is on whenever
+file changes are reported, and the receipt says so with files: true).
+
+Upstream: none yet; the ACP has no turn-level rewind (Zed edits a message by
+truncating its own thread).
+
+Drop: when the ACP gains a standard turn-level revert that the bridge serves.
+---
+ src/acp-agent.ts         | 90 +++++++++++++++++++++++++++++++++++++++-
+ src/tests/acp-v2.test.ts | 29 +++++++++++++
+ src/v2/agent.ts          |  9 ++++
+ src/v2/prompt.ts         |  7 +++-
+ 4 files changed, 133 insertions(+), 2 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 5a32b9d..745b9ab 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -703,6 +703,19 @@ const TURN_NO_RESULT_MESSAGE =
+  *  `InitializeResponse._meta.steering.supported`. */
+ export const STEER_METHOD = "_session/steering";
+ 
++/** gugu (#7304): step a conversation back to before one of its prompts. See `ClaudeAcpAgent.revertConversation`. */
++export const REVERT_METHOD = "_session/revert";
++export type RevertRequest = { sessionId: string; before: string; files?: "keep" | "restore" };
++export type RevertResponse = { sessionId: string; files: "kept" | "restored" };
++export function parseRevertRequest(params: unknown): RevertRequest {
++  const value = (params ?? {}) as Partial<RevertRequest>;
++  if (typeof value.sessionId !== "string" || typeof value.before !== "string" || !value.before
++    || (value.files !== undefined && value.files !== "keep" && value.files !== "restore")) {
++    throw RequestError.invalidParams(params, "Invalid conversation revert target");
++  }
++  return { sessionId: value.sessionId, before: value.before, ...(value.files ? { files: value.files } : {}) };
++}
++
+ /** Stops one Claude background task without cancelling the parent prompt turn. */
+ export const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
+ 
+@@ -3239,6 +3252,62 @@ export class ClaudeAcpAgent {
+    * copied transcript, with the model and the permission mode it records. A
+    * later load or resume with the same settings reuses it.
+    */
++  /**
++   * gugu (#7304): steps the conversation back to before one of its prompts, in place: the same session id, a query
++   * resumed at the last chain entry before that prompt (`resumeSessionAt`), so the next prompt continues from there.
++   * `before` is the prompt uuid that the prompt's receipt and a replay give as the revert point. With
++   * `files: "restore"`, the files Claude edited from that prompt on are restored first (`Query.rewindFiles`; Bash
++   * changes are not tracked). The rewound entries stay in the transcript file as a branch that nothing reads; a plain
++   * resume before the next prompt can still bring them back, as in Claude Code's own `/rewind`.
++   */
++  /** gugu (#7304): the client declared `_meta["gugu.revert"]`, so prompts carry the point a revert steps back to. */
++  revertAnchors(): boolean {
++    const meta = (this.clientCapabilities as { _meta?: Record<string, unknown> } | undefined)?._meta;
++    return meta?.["gugu.revert"] === true;
++  }
++
++  /** gugu (#7304): whether a revert can also restore files: checkpointing is on for file reports and for revert. */
++  revertRestoresFiles(): boolean {
++    return this.revertAnchors() || supportsAgentFileChangeReport(this.clientCapabilities);
++  }
++
++  async revertConversation(params: RevertRequest): Promise<RevertResponse> {
++    while (this.providerUpdate) await this.providerUpdate;
++    const session = this.sessions[params.sessionId];
++    if (!session?.creationParams) {
++      throw RequestError.invalidParams({ sessionId: params.sessionId }, "Unknown session");
++    }
++    if (session.turnQueue?.some((turn) => !turn.settled)) {
++      throw RequestError.invalidRequest(undefined, "Wait for current work to finish before reverting");
++    }
++    const messages = await getSessionMessages(params.sessionId);
++    const index = messages.findIndex((message) => message.uuid === params.before);
++    if (index < 0) {
++      throw RequestError.invalidParams({ before: params.before }, "This revert point is not in the conversation");
++    }
++    const kept = messages[index - 1]?.uuid;
++    if (!kept) {
++      throw RequestError.invalidParams(
++        { before: params.before },
++        "Claude Code cannot step back before the first message of a conversation",
++      );
++    }
++    let files: RevertResponse["files"] = "kept";
++    if (params.files === "restore") {
++      const result = await session.query.rewindFiles(params.before);
++      if (!result.canRewind) {
++        throw RequestError.internalError(result, `Could not restore the files: ${result.error ?? "no checkpoint"}`);
++      }
++      files = "restored";
++    }
++    await this.replaceSessionQuery(params.sessionId, session, session.creationParams, kept);
++    const recreated = this.sessions[params.sessionId];
++    if (!recreated || recreated.tornDown) {
++      throw RequestError.internalError(undefined, "The session closed while it was being reverted");
++    }
++    return { sessionId: params.sessionId, files };
++  }
++
+   async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
+     while (this.providerUpdate) await this.providerUpdate;
+     // Reject a bad `cwd` or prompt before copying the transcript.
+@@ -4369,6 +4438,7 @@ export class ClaudeAcpAgent {
+       permissionMode?: PermissionMode;
+       resumedModelHint?: string | Promise<string | undefined>;
+       replacingSession?: Session;
++      resumeSessionAt?: string;
+     },
+   ): Promise<NewSessionResponse> {
+     try {
+@@ -10000,6 +10070,10 @@ export class ClaudeAcpAgent {
+       ) {
+         replayTurnId = message.uuid;
+       }
++      const revertAnchor =
++        this.revertAnchors() && !child && message.type === "user" && message.parent_tool_use_id === null && typeof message.uuid === "string"
++          ? message.uuid
++          : undefined;
+       // Backfill the ACP messageId -> SDK uuid mapping for messages we didn't
+       // observe live (resumed/loaded sessions), so rewind/resume can translate
+       // a client-supplied id without an extra getSessionMessages read. Not read
+@@ -10173,6 +10247,14 @@ export class ClaudeAcpAgent {
+           continue;
+         }
+         if (rfdReplay && (await rfdReplay.toolCallUpdate(notification.update, child))) continue;
++        // gugu (#7304): a prompt replays with the point a revert steps back to, as its live receipt gave it.
++        if (revertAnchor && notification.update.sessionUpdate === "user_message_chunk") {
++          notification.update._meta = {
++            ...notification.update._meta,
++            guguRevertAnchor: revertAnchor,
++            ...(this.revertRestoresFiles() ? { guguRevertFiles: true } : {}),
++          };
++        }
+         await this.client.sessionUpdate({ ...notification, sessionId: replayTargetSessionId });
+       }
+ 
+@@ -12095,6 +12177,8 @@ export class ClaudeAcpAgent {
+     params: NewSessionRequest,
+     creationOpts: {
+       resume?: string;
++      /** gugu (#7304): with `resume`, continue from this chain entry; later entries stay in the file but out of the conversation. */
++      resumeSessionAt?: string;
+       forkSession?: boolean;
+       publicSessionId?: string;
+       permissionMode?: PermissionMode;
+@@ -12395,7 +12479,8 @@ export class ClaudeAcpAgent {
+       // Claude Code uses the same checkpoint store for /rewind. Enable it only
+       // for clients that negotiated per-turn file-change reports; this avoids
+       // snapshot I/O for every other session.
+-      ...(fileChangeReporter ? { enableFileCheckpointing: true } : {}),
++      // gugu (#7304): a client that reverts can also restore files, which needs the checkpoints.
++      ...(fileChangeReporter || this.revertAnchors() ? { enableFileCheckpointing: true } : {}),
+       ...(settings && { settings }),
+       env,
+       // Override certain fields that must be controlled by ACP
+@@ -12599,6 +12684,7 @@ export class ClaudeAcpAgent {
+         ],
+       },
+       ...(creationOpts.resume !== undefined && { resume: creationOpts.resume }),
++      ...(creationOpts.resumeSessionAt !== undefined && { resumeSessionAt: creationOpts.resumeSessionAt }),
+       ...(creationOpts.forkSession !== undefined && { forkSession: creationOpts.forkSession }),
+       abortController,
+     };
+@@ -13087,6 +13173,7 @@ export class ClaudeAcpAgent {
+     sessionId: string,
+     session: Session,
+     creationParams: NewSessionRequest,
++    resumeSessionAt?: string,
+   ): Promise<void> {
+     this.closeQueryStream(session);
+     // Keep the old record visible so closeSession and dispose can mark it torn down.
+@@ -13094,6 +13181,7 @@ export class ClaudeAcpAgent {
+     await this.recreateLiveSession(withoutEffort(creationParams), sessionId, {
+       permissionMode: session.modes.currentModeId as PermissionMode,
+       replacingSession: session,
++      ...(resumeSessionAt !== undefined && { resumeSessionAt }),
+     });
+     const recreated = this.sessions[sessionId];
+     if (!recreated || recreated.tornDown) return;
+diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
+index a4952fc..9b4b6b0 100644
+--- a/src/tests/acp-v2.test.ts
++++ b/src/tests/acp-v2.test.ts
+@@ -7247,3 +7247,32 @@ describe("ACP v2 extensions", () => {
+     ).toEqual([]);
+   });
+ });
++
++describe("gugu conversation revert (_session/revert)", () => {
++  it("gives a prompt its revert point only to a client that declares gugu.revert", async () => {
++    const echoed = scriptTurns(async function* (options) {
++      yield assistantText(options, "Hello!");
++      yield result(options);
++    });
++    const client = v2Client();
++    await client.app.connectWith(connectRouter(), async (agent) => {
++      await initializeV2(agent, { _meta: { "gugu.revert": true } } as v2.ClientCapabilities);
++      const { sessionId } = await agent.request(v2.methods.agent.session.new, { cwd });
++      const response = await agent.request(v2.methods.agent.session.prompt, {
++        sessionId,
++        prompt: text("hi"),
++      });
++      expect(response).toMatchObject({ messageId: echoed[0], _meta: { guguRevert: { before: echoed[0] } } });
++      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates).at(-1)).toBe("idle end_turn"));
++      await client.authUpdate(1);
++    });
++  });
++
++  it("refuses a malformed revert target", async () => {
++    const { parseRevertRequest } = await import("../acp-agent.js");
++    expect(parseRevertRequest({ sessionId: "s", before: "u" })).toEqual({ sessionId: "s", before: "u" });
++    expect(parseRevertRequest({ sessionId: "s", before: "u", files: "restore" })).toEqual({ sessionId: "s", before: "u", files: "restore" });
++    expect(() => parseRevertRequest({ sessionId: "s", before: "" })).toThrow("Invalid conversation revert target");
++    expect(() => parseRevertRequest({ sessionId: "s", before: "u", files: "all" })).toThrow("Invalid conversation revert target");
++  });
++});
+diff --git a/src/v2/agent.ts b/src/v2/agent.ts
+index 05d2803..580d89a 100644
+--- a/src/v2/agent.ts
++++ b/src/v2/agent.ts
+@@ -21,6 +21,10 @@ import {
+   parseAsyncTaskStopRequest,
+   parseSteerRequest,
+   STEER_METHOD,
++  REVERT_METHOD,
++  parseRevertRequest,
++  type RevertRequest,
++  type RevertResponse,
+   type AcpClient,
+   type AsyncTaskStopRequest,
+   type AsyncTaskStopResponse,
+@@ -207,6 +211,11 @@ export function v2AgentApp(
+       ASYNC_TASK_STOP_METHOD,
+       { parse: parseAsyncTaskStopRequest },
+       ({ params }) => agent.stopAsyncTask(params),
++    )
++    .onRequest<RevertRequest, RevertResponse>(
++      REVERT_METHOD,
++      { parse: parseRevertRequest },
++      ({ params }) => agent.revertConversation(params),
+     );
+ }
+ 
+diff --git a/src/v2/prompt.ts b/src/v2/prompt.ts
+index 816577a..8d8321e 100644
+--- a/src/v2/prompt.ts
++++ b/src/v2/prompt.ts
+@@ -39,7 +39,12 @@ export function v2Prompt(
+       inserted(messageId) {
+         inserted = true;
+         send({ sessionUpdate: "user_message", messageId, content: params.prompt });
+-        resolve({ messageId });
++        // gugu (#7304): the prompt uuid is the point a revert steps back to (`_session/revert`).
++        resolve(
++          agent.revertAnchors()
++            ? { messageId, _meta: { guguRevert: { before: messageId, ...(agent.revertRestoresFiles() ? { files: true } : {}) } } }
++            : { messageId },
++        );
+       },
+       ended(outcome) {
+         if (inserted) return;
+-- 
+2.56.0
+
