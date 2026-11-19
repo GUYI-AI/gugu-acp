@@ -1,78 +1,132 @@
-From 395092d2a7c8357aa1a377b9966cfc5415237679 Mon Sep 17 00:00:00 2001
+From 2b626decbf85bd16e6eb161ed1a5561e0780978c Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
-Date: Mon, 16 Nov 2026 23:20:20 +0000
+Date: Thu, 19 Nov 2026 06:21:36 -0800
 Subject: [PATCH] gugu: step a conversation back to before one of its prompts
  (_session/revert)
 
 Why: a turn the model service refuses stays in the conversation, so every
-later turn is refused with it and the session is lost. Gugu offers
-"rewind and edit" on a user message (gugu#7304): the bridge must cut the
-conversation back to before that prompt, in place, and continue from there.
-The prompt receipt and the replay give each prompt its revert point (the
-prompt uuid). _session/revert {sessionId, before, files?} restarts the query
-with resume + resumeSessionAt at the last chain entry before the prompt,
-under the same session id; files: "restore" first restores the files Claude
-edited from that prompt on (Query.rewindFiles; checkpointing is on whenever
-file changes are reported, and the receipt says so with files: true).
+later turn is refused with it and the session is lost. Gugu offers "rewind
+and edit" on a user message: the bridge must cut the conversation back to
+before that prompt, in place, and continue from there.
+
+A client that declares _meta["gugu.revert"] gets, on every prompt but the
+first of a conversation, the point a revert steps back to: _meta.guguRevert
+{ before, files } on the prompt receipt and on the replayed user message
+(before = the prompt uuid). The declaration also turns file checkpointing on,
+which is why it is an opt-in. _session/revert { sessionId, before,
+restoreFiles? } restarts the query with resume + resumeSessionAt at the last
+chain entry before the prompt, under the same session id; restoreFiles first
+restores the files Claude edited from that prompt on (Query.rewindFiles) and
+fails the request if it cannot.
+
+resumeSessionAt alone writes nothing: until the next prompt the transcript
+still ends at the removed turns, and a restart of the bridge or a plain
+`claude --resume` continues from them (measured: all removed turns came
+back). So the revert appends one transcript-only entry at the kept point
+(shouldQuery: false, no model turn) and answers once it is on disk. The
+model reads that entry with the next prompt; a replay leaves it out.
 
 Upstream: none yet; the ACP has no turn-level rewind (Zed edits a message by
 truncating its own thread).
 
 Drop: when the ACP gains a standard turn-level revert that the bridge serves.
 ---
- src/acp-agent.ts         | 90 +++++++++++++++++++++++++++++++++++++++-
- src/tests/acp-v2.test.ts | 29 +++++++++++++
- src/v2/agent.ts          |  9 ++++
- src/v2/prompt.ts         |  7 +++-
- 4 files changed, 133 insertions(+), 2 deletions(-)
+ src/acp-agent.ts         | 151 ++++++++++++++++++++++++++++++++++++++-
+ src/tests/acp-v2.test.ts |  59 +++++++++++++++
+ src/v2/agent.ts          |   9 +++
+ src/v2/prompt.ts         |   4 +-
+ 4 files changed, 220 insertions(+), 3 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 5a32b9d..745b9ab 100644
+index 5a32b9d..42b2368 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
-@@ -703,6 +703,19 @@ const TURN_NO_RESULT_MESSAGE =
+@@ -703,9 +703,41 @@ const TURN_NO_RESULT_MESSAGE =
   *  `InitializeResponse._meta.steering.supported`. */
  export const STEER_METHOD = "_session/steering";
  
-+/** gugu (#7304): step a conversation back to before one of its prompts. See `ClaudeAcpAgent.revertConversation`. */
++/** gugu: step a conversation back to before one of its prompts. See `ClaudeAcpAgent.revertConversation`. */
 +export const REVERT_METHOD = "_session/revert";
-+export type RevertRequest = { sessionId: string; before: string; files?: "keep" | "restore" };
-+export type RevertResponse = { sessionId: string; files: "kept" | "restored" };
++/** `restoreFiles` also restores the files Claude edited from that prompt on; a restore that cannot be done fails the request. */
++export type RevertRequest = { sessionId: string; before: string; restoreFiles?: boolean };
++export type RevertResponse = { sessionId: string };
 +export function parseRevertRequest(params: unknown): RevertRequest {
 +  const value = (params ?? {}) as Partial<RevertRequest>;
 +  if (typeof value.sessionId !== "string" || typeof value.before !== "string" || !value.before
-+    || (value.files !== undefined && value.files !== "keep" && value.files !== "restore")) {
++    || (value.restoreFiles !== undefined && typeof value.restoreFiles !== "boolean")) {
 +    throw RequestError.invalidParams(params, "Invalid conversation revert target");
 +  }
-+  return { sessionId: value.sessionId, before: value.before, ...(value.files ? { files: value.files } : {}) };
++  return { sessionId: value.sessionId, before: value.before, ...(value.restoreFiles ? { restoreFiles: true } : {}) };
++}
++
++/**
++ * gugu: the transcript entry a revert writes at the point it stepped back to (see `ClaudeAcpAgent.revertConversation`).
++ * The model reads it as part of the next prompt; a replay leaves it out.
++ */
++export const REVERT_MARK = "(The conversation was stepped back to this point. The turns after it were removed.)";
++export function isRevertMark(message: unknown): boolean {
++  const { type, message: api } = (message ?? {}) as { type?: unknown; message?: { content?: unknown } };
++  if (type !== "user") return false;
++  const content = api?.content;
++  if (content === REVERT_MARK) return true;
++  return Array.isArray(content) && content.length === 1
++    && (content[0] as { type?: unknown; text?: unknown })?.type === "text"
++    && (content[0] as { text?: unknown }).text === REVERT_MARK;
 +}
 +
  /** Stops one Claude background task without cancelling the parent prompt turn. */
  export const ASYNC_TASK_STOP_METHOD = "_session/async_task/stop";
  
-@@ -3239,6 +3252,62 @@ export class ClaudeAcpAgent {
++/** How long a revert waits for Claude Code to write its entry before it fails. */
++const REVERT_PERSIST_TIMEOUT_MS = 15_000;
++
+ export type AsyncTaskStopRequest = {
+   sessionId: string;
+   asyncTaskId: string;
+@@ -1185,6 +1217,8 @@ export type Session = {
+    *  back yet. Claude Code stamps the echo with the same human origin as a
+    *  message typed in another client, so the uuid is what tells the two apart. */
+   sentUserUuids?: Set<string>;
++  /** gugu: Claude Code took a prompt in on this query; with `resumedFromHistory`, how `revertPoint` knows a first prompt. */
++  promptTaken?: boolean;
+   /** The `/remote-control` command that is running, from its request to its
+    *  reply. Prompts wait for it, and a second command is refused meanwhile. */
+   remoteControlCommand?: Promise<void>;
+@@ -3239,6 +3273,100 @@ export class ClaudeAcpAgent {
     * copied transcript, with the model and the permission mode it records. A
     * later load or resume with the same settings reuses it.
     */
-+  /**
-+   * gugu (#7304): steps the conversation back to before one of its prompts, in place: the same session id, a query
-+   * resumed at the last chain entry before that prompt (`resumeSessionAt`), so the next prompt continues from there.
-+   * `before` is the prompt uuid that the prompt's receipt and a replay give as the revert point. With
-+   * `files: "restore"`, the files Claude edited from that prompt on are restored first (`Query.rewindFiles`; Bash
-+   * changes are not tracked). The rewound entries stay in the transcript file as a branch that nothing reads; a plain
-+   * resume before the next prompt can still bring them back, as in Claude Code's own `/rewind`.
-+   */
-+  /** gugu (#7304): the client declared `_meta["gugu.revert"]`, so prompts carry the point a revert steps back to. */
++  /** gugu: the client declared `_meta["gugu.revert"]`: prompts carry the point a revert steps back to, and file checkpointing is on for it. */
 +  revertAnchors(): boolean {
 +    const meta = (this.clientCapabilities as { _meta?: Record<string, unknown> } | undefined)?._meta;
 +    return meta?.["gugu.revert"] === true;
 +  }
 +
-+  /** gugu (#7304): whether a revert can also restore files: checkpointing is on for file reports and for revert. */
-+  revertRestoresFiles(): boolean {
-+    return this.revertAnchors() || supportsAgentFileChangeReport(this.clientCapabilities);
++  /**
++   * gugu: the revert point of the prompt Claude Code just took in, as `_meta.guguRevert` of its receipt; a replay
++   * gives the same shape. `files` = a revert to it can also restore files. The first prompt of a conversation has
++   * none: there is no earlier entry to continue from (see `revertConversation`).
++   */
++  revertPoint(sessionId: string, promptUuid: string): { before: string; files: true } | undefined {
++    const session = this.sessions[sessionId];
++    if (!session || !this.revertAnchors()) return undefined;
++    const first = !session.resumedFromHistory && !session.promptTaken;
++    session.promptTaken = true;
++    return first ? undefined : { before: promptUuid, files: true };
 +  }
 +
++  /**
++   * gugu: steps the conversation back to before one of its prompts, in place: the same session id, a query resumed
++   * at the last chain entry before that prompt (`resumeSessionAt`), so the next prompt continues from there.
++   * `before` is the prompt uuid that the prompt's receipt and a replay give as the revert point. With `restoreFiles`,
++   * the files Claude edited from that prompt on are restored first (`Query.rewindFiles`; Bash changes are not tracked).
++   *
++   * `resumeSessionAt` alone writes nothing: the transcript still ends at the removed turns, and any plain resume
++   * before the next prompt (a restart of this adapter, `claude --resume` in a terminal) continues from them. So the
++   * revert appends one entry at the kept point (`REVERT_MARK`, `shouldQuery: false`: no model turn) and answers only
++   * once it is in the transcript. From then on the removed turns are a branch that nothing continues.
++   * `resumeDropsTurn` is not passed: its validator refuses a later revert that would remove such an entry.
++   */
 +  async revertConversation(params: RevertRequest): Promise<RevertResponse> {
 +    while (this.providerUpdate) await this.providerUpdate;
 +    const session = this.sessions[params.sessionId];
@@ -94,26 +148,52 @@ index 5a32b9d..745b9ab 100644
 +        "Claude Code cannot step back before the first message of a conversation",
 +      );
 +    }
-+    let files: RevertResponse["files"] = "kept";
-+    if (params.files === "restore") {
++    if (params.restoreFiles) {
 +      const result = await session.query.rewindFiles(params.before);
 +      if (!result.canRewind) {
 +        throw RequestError.internalError(result, `Could not restore the files: ${result.error ?? "no checkpoint"}`);
 +      }
-+      files = "restored";
 +    }
 +    await this.replaceSessionQuery(params.sessionId, session, session.creationParams, kept);
 +    const recreated = this.sessions[params.sessionId];
 +    if (!recreated || recreated.tornDown) {
 +      throw RequestError.internalError(undefined, "The session closed while it was being reverted");
 +    }
-+    return { sessionId: params.sessionId, files };
++    await this.persistRevert(params.sessionId, recreated);
++    return { sessionId: params.sessionId };
++  }
++
++  /** Writes the revert into the transcript (see `revertConversation`) and waits until a plain resume would read it. */
++  private async persistRevert(sessionId: string, session: Session): Promise<void> {
++    const uuid = randomUUID();
++    (session.sentUserUuids ??= new Set()).add(uuid);
++    session.input.push({
++      type: "user",
++      message: { role: "user", content: REVERT_MARK },
++      parent_tool_use_id: null,
++      session_id: sessionId,
++      uuid,
++      shouldQuery: false,
++    } as SDKUserMessage);
++    this.ensureConsumer(session, sessionId);
++    const deadline = Date.now() + REVERT_PERSIST_TIMEOUT_MS;
++    for (;;) {
++      if ((await getSessionMessages(sessionId)).some((message) => message.uuid === uuid)) return;
++      if (session.tornDown) throw RequestError.internalError(undefined, "The session closed while it was being reverted");
++      if (Date.now() > deadline) {
++        throw RequestError.internalError(
++          undefined,
++          "The conversation was stepped back, but Claude Code did not record it; a restart before the next prompt brings the removed turns back",
++        );
++      }
++      await new Promise((resolve) => setTimeout(resolve, 100));
++    }
 +  }
 +
    async unstable_forkSession(params: ForkSessionRequest): Promise<ForkSessionResponse> {
      while (this.providerUpdate) await this.providerUpdate;
      // Reject a bad `cwd` or prompt before copying the transcript.
-@@ -4369,6 +4438,7 @@ export class ClaudeAcpAgent {
+@@ -4369,6 +4497,7 @@ export class ClaudeAcpAgent {
        permissionMode?: PermissionMode;
        resumedModelHint?: string | Promise<string | undefined>;
        replacingSession?: Session;
@@ -121,52 +201,61 @@ index 5a32b9d..745b9ab 100644
      },
    ): Promise<NewSessionResponse> {
      try {
-@@ -10000,6 +10070,10 @@ export class ClaudeAcpAgent {
+@@ -9986,7 +10115,7 @@ export class ClaudeAcpAgent {
+       // so other sessions and incoming requests are not starved meanwhile.
+       const pause = messageLoopYielder.maybeYield();
+       if (pause) await pause;
+-      if (pending?.stopped || isReplayHiddenMetaMessage(message)) {
++      if (pending?.stopped || isReplayHiddenMetaMessage(message) || isRevertMark(message)) {
+         return;
+       }
+       // In the RFD form a child's history comes from its own transcript, so a
+@@ -10000,6 +10129,11 @@ export class ClaudeAcpAgent {
        ) {
          replayTurnId = message.uuid;
        }
++      // gugu: the conversation's first entry has no revert point (see `revertPoint`).
 +      const revertAnchor =
-+        this.revertAnchors() && !child && message.type === "user" && message.parent_tool_use_id === null && typeof message.uuid === "string"
++        this.revertAnchors() && !child && message !== messages[0] && message.type === "user" && message.parent_tool_use_id === null && typeof message.uuid === "string"
 +          ? message.uuid
 +          : undefined;
        // Backfill the ACP messageId -> SDK uuid mapping for messages we didn't
        // observe live (resumed/loaded sessions), so rewind/resume can translate
        // a client-supplied id without an extra getSessionMessages read. Not read
-@@ -10173,6 +10247,14 @@ export class ClaudeAcpAgent {
+@@ -10173,6 +10307,13 @@ export class ClaudeAcpAgent {
            continue;
          }
          if (rfdReplay && (await rfdReplay.toolCallUpdate(notification.update, child))) continue;
-+        // gugu (#7304): a prompt replays with the point a revert steps back to, as its live receipt gave it.
++        // gugu: a prompt replays with the point a revert steps back to, as its live receipt gave it.
 +        if (revertAnchor && notification.update.sessionUpdate === "user_message_chunk") {
 +          notification.update._meta = {
 +            ...notification.update._meta,
-+            guguRevertAnchor: revertAnchor,
-+            ...(this.revertRestoresFiles() ? { guguRevertFiles: true } : {}),
++            guguRevert: { before: revertAnchor, files: true },
 +          };
 +        }
          await this.client.sessionUpdate({ ...notification, sessionId: replayTargetSessionId });
        }
  
-@@ -12095,6 +12177,8 @@ export class ClaudeAcpAgent {
+@@ -12095,6 +12236,8 @@ export class ClaudeAcpAgent {
      params: NewSessionRequest,
      creationOpts: {
        resume?: string;
-+      /** gugu (#7304): with `resume`, continue from this chain entry; later entries stay in the file but out of the conversation. */
++      /** gugu: with `resume`, continue from this chain entry; later entries stay in the file but out of the conversation. */
 +      resumeSessionAt?: string;
        forkSession?: boolean;
        publicSessionId?: string;
        permissionMode?: PermissionMode;
-@@ -12395,7 +12479,8 @@ export class ClaudeAcpAgent {
+@@ -12395,7 +12538,8 @@ export class ClaudeAcpAgent {
        // Claude Code uses the same checkpoint store for /rewind. Enable it only
        // for clients that negotiated per-turn file-change reports; this avoids
        // snapshot I/O for every other session.
 -      ...(fileChangeReporter ? { enableFileCheckpointing: true } : {}),
-+      // gugu (#7304): a client that reverts can also restore files, which needs the checkpoints.
++      // gugu: a client that reverts can also restore files, which needs the checkpoints.
 +      ...(fileChangeReporter || this.revertAnchors() ? { enableFileCheckpointing: true } : {}),
        ...(settings && { settings }),
        env,
        // Override certain fields that must be controlled by ACP
-@@ -12599,6 +12684,7 @@ export class ClaudeAcpAgent {
+@@ -12599,6 +12743,7 @@ export class ClaudeAcpAgent {
          ],
        },
        ...(creationOpts.resume !== undefined && { resume: creationOpts.resume }),
@@ -174,7 +263,7 @@ index 5a32b9d..745b9ab 100644
        ...(creationOpts.forkSession !== undefined && { forkSession: creationOpts.forkSession }),
        abortController,
      };
-@@ -13087,6 +13173,7 @@ export class ClaudeAcpAgent {
+@@ -13087,6 +13232,7 @@ export class ClaudeAcpAgent {
      sessionId: string,
      session: Session,
      creationParams: NewSessionRequest,
@@ -182,7 +271,7 @@ index 5a32b9d..745b9ab 100644
    ): Promise<void> {
      this.closeQueryStream(session);
      // Keep the old record visible so closeSession and dispose can mark it torn down.
-@@ -13094,6 +13181,7 @@ export class ClaudeAcpAgent {
+@@ -13094,6 +13240,7 @@ export class ClaudeAcpAgent {
      await this.recreateLiveSession(withoutEffort(creationParams), sessionId, {
        permissionMode: session.modes.currentModeId as PermissionMode,
        replacingSession: session,
@@ -191,30 +280,51 @@ index 5a32b9d..745b9ab 100644
      const recreated = this.sessions[sessionId];
      if (!recreated || recreated.tornDown) return;
 diff --git a/src/tests/acp-v2.test.ts b/src/tests/acp-v2.test.ts
-index a4952fc..9b4b6b0 100644
+index a4952fc..350819c 100644
 --- a/src/tests/acp-v2.test.ts
 +++ b/src/tests/acp-v2.test.ts
-@@ -7247,3 +7247,32 @@ describe("ACP v2 extensions", () => {
+@@ -7247,3 +7247,62 @@ describe("ACP v2 extensions", () => {
      ).toEqual([]);
    });
  });
 +
 +describe("gugu conversation revert (_session/revert)", () => {
-+  it("gives a prompt its revert point only to a client that declares gugu.revert", async () => {
-+    const echoed = scriptTurns(async function* (options) {
++  it("gives every prompt but the first its revert point, to a client that declares gugu.revert", async () => {
++    const turn: TurnScript = async function* (options) {
 +      yield assistantText(options, "Hello!");
 +      yield result(options);
-+    });
++    };
++    const echoed = scriptTurns(turn, turn);
 +    const client = v2Client();
 +    await client.app.connectWith(connectRouter(), async (agent) => {
 +      await initializeV2(agent, { _meta: { "gugu.revert": true } } as v2.ClientCapabilities);
 +      const { sessionId } = await agent.request(v2.methods.agent.session.new, { cwd });
-+      const response = await agent.request(v2.methods.agent.session.prompt, {
-+        sessionId,
-+        prompt: text("hi"),
-+      });
-+      expect(response).toMatchObject({ messageId: echoed[0], _meta: { guguRevert: { before: echoed[0] } } });
++      // Nothing is kept before the first prompt of a conversation, so there is no point to step back to.
++      const first = await agent.request(v2.methods.agent.session.prompt, { sessionId, prompt: text("hi") });
++      expect(first).toEqual({ messageId: echoed[0] });
 +      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates).at(-1)).toBe("idle end_turn"));
++      const second = await agent.request(v2.methods.agent.session.prompt, { sessionId, prompt: text("again") });
++      expect(second).toEqual({ messageId: echoed[1], _meta: { guguRevert: { before: echoed[1], files: true } } });
++      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates).filter((state) => state === "idle end_turn")).toHaveLength(2));
++      await client.authUpdate(1);
++    });
++  });
++
++  it("gives no revert point to a client that does not declare gugu.revert", async () => {
++    const turn: TurnScript = async function* (options) {
++      yield assistantText(options, "Hello!");
++      yield result(options);
++    };
++    const echoed = scriptTurns(turn, turn);
++    const client = v2Client();
++    await client.app.connectWith(connectRouter(), async (agent) => {
++      await initializeV2(agent);
++      const { sessionId } = await agent.request(v2.methods.agent.session.new, { cwd });
++      await agent.request(v2.methods.agent.session.prompt, { sessionId, prompt: text("hi") });
++      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates).at(-1)).toBe("idle end_turn"));
++      const second = await agent.request(v2.methods.agent.session.prompt, { sessionId, prompt: text("again") });
++      expect(second).toEqual({ messageId: echoed[1] });
++      await vi.waitFor(() => expect(turnTrace(client.sessionUpdates).filter((state) => state === "idle end_turn")).toHaveLength(2));
 +      await client.authUpdate(1);
 +    });
 +  });
@@ -222,9 +332,18 @@ index a4952fc..9b4b6b0 100644
 +  it("refuses a malformed revert target", async () => {
 +    const { parseRevertRequest } = await import("../acp-agent.js");
 +    expect(parseRevertRequest({ sessionId: "s", before: "u" })).toEqual({ sessionId: "s", before: "u" });
-+    expect(parseRevertRequest({ sessionId: "s", before: "u", files: "restore" })).toEqual({ sessionId: "s", before: "u", files: "restore" });
++    expect(parseRevertRequest({ sessionId: "s", before: "u", restoreFiles: false })).toEqual({ sessionId: "s", before: "u" });
++    expect(parseRevertRequest({ sessionId: "s", before: "u", restoreFiles: true })).toEqual({ sessionId: "s", before: "u", restoreFiles: true });
 +    expect(() => parseRevertRequest({ sessionId: "s", before: "" })).toThrow("Invalid conversation revert target");
-+    expect(() => parseRevertRequest({ sessionId: "s", before: "u", files: "all" })).toThrow("Invalid conversation revert target");
++    expect(() => parseRevertRequest({ sessionId: "s", before: "u", restoreFiles: "yes" })).toThrow("Invalid conversation revert target");
++  });
++
++  it("knows the entry a revert writes, as a string and as a single text block, and nothing else", async () => {
++    const { REVERT_MARK, isRevertMark } = await import("../acp-agent.js");
++    expect(isRevertMark({ type: "user", message: { role: "user", content: REVERT_MARK } })).toBe(true);
++    expect(isRevertMark({ type: "user", message: { role: "user", content: [{ type: "text", text: REVERT_MARK }] } })).toBe(true);
++    expect(isRevertMark({ type: "user", message: { role: "user", content: `${REVERT_MARK} and more` } })).toBe(false);
++    expect(isRevertMark({ type: "assistant", message: { role: "assistant", content: REVERT_MARK } })).toBe(false);
 +  });
 +});
 diff --git a/src/v2/agent.ts b/src/v2/agent.ts
@@ -255,23 +374,20 @@ index 05d2803..580d89a 100644
  }
  
 diff --git a/src/v2/prompt.ts b/src/v2/prompt.ts
-index 816577a..8d8321e 100644
+index 816577a..1b18b77 100644
 --- a/src/v2/prompt.ts
 +++ b/src/v2/prompt.ts
-@@ -39,7 +39,12 @@ export function v2Prompt(
+@@ -39,7 +39,9 @@ export function v2Prompt(
        inserted(messageId) {
          inserted = true;
          send({ sessionUpdate: "user_message", messageId, content: params.prompt });
 -        resolve({ messageId });
-+        // gugu (#7304): the prompt uuid is the point a revert steps back to (`_session/revert`).
-+        resolve(
-+          agent.revertAnchors()
-+            ? { messageId, _meta: { guguRevert: { before: messageId, ...(agent.revertRestoresFiles() ? { files: true } : {}) } } }
-+            : { messageId },
-+        );
++        // gugu: the prompt uuid is the point a revert steps back to (`_session/revert`).
++        const guguRevert = agent.revertPoint(params.sessionId, messageId);
++        resolve(guguRevert ? { messageId, _meta: { guguRevert } } : { messageId });
        },
        ended(outcome) {
          if (inserted) return;
 -- 
-2.56.0
+2.43.0
 
