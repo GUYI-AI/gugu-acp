@@ -130,6 +130,23 @@
               "how": "abc (CI, upstream v0.101.0)"
             }
           ]
+        },
+        {
+          "version": "1.7.1",
+          "upstreamTag": "v0.101.0",
+          "cliFrom": "2.1.322",
+          "verified": [
+            {
+              "cli": "2.1.322",
+              "at": "2026-11-19",
+              "how": "abc (juma3, the published 1.7.1 tarball, model through the machine's Claude login)"
+            },
+            {
+              "cli": "2.1.328",
+              "at": "2026-11-19",
+              "how": "abc (juma3, the published 1.7.1 tarball, model through the machine's Claude login)"
+            }
+          ]
         }
       ]
     }
