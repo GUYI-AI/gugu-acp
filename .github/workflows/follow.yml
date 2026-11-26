@@ -6,11 +6,44 @@ on:
         description: Run the read-only A comparison
         type: boolean
         default: false
+      check_abc_host_only:
+        description: Compare the configured ABC hostname without making a model request
+        type: boolean
+        default: false
+      expected_abc_hostname:
+        description: The expected hostname for the ABC configuration check
+        type: string
+        required: false
 permissions:
   contents: read
 jobs:
+  check-host:
+    if: inputs.check_abc_host_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Compare the configured ABC hostname
+        env:
+          ABC_ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
+          EXPECTED_ABC_HOSTNAME: ${{ inputs.expected_abc_hostname }}
+        run: |
+          node --input-type=module <<'NODE'
+          const address = process.env.ABC_ANTHROPIC_BASE_URL?.trim()
+          const expected = process.env.EXPECTED_ABC_HOSTNAME?.trim().toLowerCase()
+
+          if (!address || !expected) {
+            console.log('未配置')
+          } else {
+            let hostname
+            try { hostname = new URL(address).hostname } catch {}
+            console.log(hostname === expected ? '匹配' : '不匹配')
+          }
+          NODE
   compare:
-    if: inputs.dry_run
+    if: inputs.dry_run && !inputs.check_abc_host_only
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
