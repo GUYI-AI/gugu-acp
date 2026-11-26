@@ -3,7 +3,7 @@
 // uses it, and require every turn to end. On v2 the prompt is answered once Claude Code takes it in;
 // the turn ends with the session's `state_update` `idle`.
 //
-//   node scripts/abc.mjs --adapter <bridge>/dist/index.js [--cli <claude binary>] [--work <dir>]
+//   node scripts/abc.mjs --adapter <bridge>/dist/index.js [--cli <claude binary>] [--work <dir>] [--a-only]
 //
 //   A  plain prompt                                  -> must end
 //   B  launch one background subagent               -> must end before the subagent does (v1 held the answer
@@ -82,9 +82,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const TIMEOUT = Symbol('timeout')
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => TIMEOUT)])
 /** A prompt's turn: answered when Claude Code takes the prompt in, ended at the session's next idle. */
-const prompt = async (sid, text) => {
-  const idle = nextIdle(sid)
+const prompt = async (sid, text, progress) => {
+  const idle = nextIdle(sid).then((update) => {
+    if (progress) progress.idleObserved = true
+    return update
+  })
   await call('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text }] })
+  if (progress) progress.promptAcknowledged = true
   return idle
 }
 const ended = (r) => r !== TIMEOUT && r?.stopReason === 'end_turn'
@@ -101,9 +105,11 @@ try {
 log('session', sid, cliVersion)
 
 try {
-  const a = await withTimeout(prompt(sid, 'Reply with just: hi'), 120_000)
+  results.AProgress = { promptAcknowledged: false, idleObserved: false }
+  const a = await withTimeout(prompt(sid, 'Reply with just: hi', results.AProgress), 120_000)
   results.A = a === TIMEOUT ? 'timeout' : a.stopReason; log('A', results.A)
   if (!ended(a)) verdict('FAIL', { step: 'A' })
+  if ('a-only' in args) verdict('PASS', { step: 'A' })
   await sleep(4000)
 
   const bStart = Date.now(), beforeB = updates.length
