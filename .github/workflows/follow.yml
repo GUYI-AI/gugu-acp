@@ -1,49 +1,40 @@
-name: follow
-# Unattended: follow upstream releases and new CLI versions (scripts/follow.mjs).
-# A new upstream tag -> patches + build + tests + ABC -> publish + compat add-release.
-# A new CLI version  -> ABC against our newest release -> compat record-verified.
-# Failures open (or comment on) an issue; nothing is published or recorded before every check passed.
+name: Claude ABC A comparison
 on:
-  schedule:
-    - cron: '17 */6 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'Run every check but do not publish, commit or push'
+        description: Run the read-only A comparison
         type: boolean
         default: false
 permissions:
-  contents: write
-  issues: write
-  id-token: write   # npm provenance: some upstreams (pi-acp) set publishConfig.provenance
-concurrency:
-  group: follow
-  cancel-in-progress: false
+  contents: read
 jobs:
-  follow:
+  compare:
+    if: inputs.dry_run
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        bridge: [claude-agent-acp, pi-acp]
-    env:
-      # git am --3way may need a committer for its synthetic merge base.
-      GIT_COMMITTER_NAME: gugu-acp bot
-      GIT_COMMITTER_EMAIL: gugu-acp@users.noreply.github.com
-      GH_TOKEN: ${{ github.token }}
-      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-      # Only abc.mjs hands these to the CLI (as ANTHROPIC_*); builds and upstream tests never see them.
-      ABC_ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
-      ABC_ANTHROPIC_AUTH_TOKEN: ${{ secrets.ABC_ANTHROPIC_AUTH_TOKEN }}
-      ABC_ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0   # publish-compat.mjs counts compat.json commits for its version
       - uses: actions/setup-node@v4
         with:
           node-version: 24
-      - if: matrix.bridge == 'claude-agent-acp'
-        run: node --test scripts/abc-order.test.mjs
-      - run: node scripts/follow.mjs ${{ matrix.bridge }} ${{ inputs.dry_run && '--dry-run' || '' }}
+      - name: Build and test the candidate
+        run: node scripts/build.mjs claude-agent-acp
+      - name: Install the four comparison components
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/claude-abc-matrix"
+          mkdir -p "$work"
+          tarball="$GITHUB_WORKSPACE/.work/claude-agent-acp/out/gugu-acp-claude-agent-acp-1.7.2.tgz"
+          npm install --prefix "$work/bridge-1.7.1" --omit=dev --no-audit --no-fund @gugu-acp/claude-agent-acp@1.7.1
+          npm install --prefix "$work/bridge-1.7.2" --omit=dev --no-audit --no-fund "$tarball"
+          for cli in 2.1.328 2.1.332; do
+            npm install --prefix "$work/cli-$cli" --no-audit --no-fund "@anthropic-ai/claude-code@$cli"
+          done
+      - name: Compare the ABC A phase on one runner
+        env:
+          ABC_ANTHROPIC_BASE_URL: ${{ secrets.ABC_ANTHROPIC_BASE_URL }}
+          ABC_ANTHROPIC_AUTH_TOKEN: ${{ secrets.ABC_ANTHROPIC_AUTH_TOKEN }}
+          ABC_ANTHROPIC_MODEL: ${{ vars.ABC_ANTHROPIC_MODEL }}
+        run: node scripts/abc-a-matrix.mjs "$RUNNER_TEMP/claude-abc-matrix"
