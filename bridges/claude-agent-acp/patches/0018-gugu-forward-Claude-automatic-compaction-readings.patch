@@ -1,4 +1,4 @@
-From 558021b2fa45c266318126cd96a3840793604210 Mon Sep 17 00:00:00 2001
+From 724f41f53fd9e1cfebcedc9e982d7340d2ddfd4d Mon Sep 17 00:00:00 2001
 From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
 Date: Thu, 26 Nov 2026 09:26:24 +0000
 Subject: [PATCH 18/18] gugu: forward Claude automatic compaction readings
@@ -7,12 +7,12 @@ Why: Claude Code is the authority for its effective threshold and enablement. Re
 
 Upstream: no corresponding PR. Drop when ACP usage updates from upstream carry the effective automatic compaction reading with model provenance.
 ---
- src/acp-agent.ts            | 77 +++++++++++++++++++++++++++++--------
+ src/acp-agent.ts            | 80 ++++++++++++++++++++++++++++++-------
  src/tests/acp-agent.test.ts | 36 +++++++++++++++++
- 2 files changed, 98 insertions(+), 15 deletions(-)
+ 2 files changed, 101 insertions(+), 15 deletions(-)
 
 diff --git a/src/acp-agent.ts b/src/acp-agent.ts
-index 42b2368..f981183 100644
+index 42b2368..f70ad73 100644
 --- a/src/acp-agent.ts
 +++ b/src/acp-agent.ts
 @@ -1371,6 +1371,13 @@ export type Session = {
@@ -52,7 +52,7 @@ index 42b2368..f981183 100644
          },
        };
      };
-@@ -7555,21 +7571,48 @@ export class ClaudeAcpAgent {
+@@ -7555,21 +7571,51 @@ export class ClaudeAcpAgent {
                this.sessionIndex.onOwnSessionChanged(params.sessionId);
                // Send usage_update notification
                if (lastAssistantTotalUsage !== null) {
@@ -104,6 +104,9 @@ index 42b2368..f981183 100644
 +                    ) return;
 +                    const reading = usage && [assistantModel, matchingModelUsage?.key, modelId].includes(usage.model)
 +                      ? usage : undefined;
++                    if (typeof reading?.isAutoCompactEnabled !== "boolean" &&
++                        typeof reading?.autoCompactThreshold !== "number" &&
++                        !session.autoCompactReading) return;
 +                    session.autoCompactReading = {
 +                      modelId,
 +                      assistantModel,
@@ -116,7 +119,7 @@ index 42b2368..f981183 100644
                }
  
                // A model cycle that Claude Code started on its own ends at its
-@@ -8923,6 +8966,8 @@ export class ClaudeAcpAgent {
+@@ -8923,6 +8969,8 @@ export class ClaudeAcpAgent {
              // The follow-up prompt was predicted from the transcript the reset
              // dropped, so it no longer follows from anything.
              await this.publishPromptSuggestion(params.sessionId, null);
@@ -125,7 +128,7 @@ index 42b2368..f981183 100644
              // The recorded request and TTL describe the dropped conversation.
              session.idleCompaction?.reset();
              break;
-@@ -11706,6 +11751,8 @@ export class ClaudeAcpAgent {
+@@ -11706,6 +11754,8 @@ export class ClaudeAcpAgent {
        const newModelInfo = session.modelInfos.find((m) => m.value === value);
        const modelChanged = session.models.currentModelId !== value;
        if (modelChanged) {
@@ -135,7 +138,7 @@ index 42b2368..f981183 100644
          // Seed the new model's context window WITHOUT awaited IPC on the
          // switch path: cached authoritative value if we've already learned it
 diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
-index 872263a..4e59c39 100644
+index 872263a..9a8af14 100644
 --- a/src/tests/acp-agent.test.ts
 +++ b/src/tests/acp-agent.test.ts
 @@ -15758,6 +15758,42 @@ describe("usage_update computation", () => {
@@ -171,11 +174,11 @@ index 872263a..4e59c39 100644
 +      const sample = update?._meta?.["_claude/autoCompact"];
 +      return update?.sessionUpdate === "usage_update" && sample ? [sample] : [];
 +    });
-+    expect(samples).toEqual([{
++    expect(samples).toEqual(expected ? [{
 +      modelId: "probe-alias",
-+      isAutoCompactEnabled: expected ? enabled : undefined,
-+      autoCompactThreshold: expected ? threshold : undefined,
-+    }]);
++      isAutoCompactEnabled: enabled,
++      autoCompactThreshold: threshold,
++    }] : []);
 +  });
 +
    it("used sums all token types as post-turn context occupancy proxy", async () => {
