@@ -1,0 +1,186 @@
+From 558021b2fa45c266318126cd96a3840793604210 Mon Sep 17 00:00:00 2001
+From: shuxueshuxue <98064968+shuxueshuxue@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 09:26:24 +0000
+Subject: [PATCH 18/18] gugu: forward Claude automatic compaction readings
+
+Why: Claude Code is the authority for its effective threshold and enablement. Report those fields on the existing usage update for the session and model that ran, without waiting for the SDK control request before finishing the turn.
+
+Upstream: no corresponding PR. Drop when ACP usage updates from upstream carry the effective automatic compaction reading with model provenance.
+---
+ src/acp-agent.ts            | 77 +++++++++++++++++++++++++++++--------
+ src/tests/acp-agent.test.ts | 36 +++++++++++++++++
+ 2 files changed, 98 insertions(+), 15 deletions(-)
+
+diff --git a/src/acp-agent.ts b/src/acp-agent.ts
+index 42b2368..f981183 100644
+--- a/src/acp-agent.ts
++++ b/src/acp-agent.ts
+@@ -1371,6 +1371,13 @@ export type Session = {
+    *  paths (see the seeding call sites and `contextWindowCache`). */
+   contextWindowSize: number;
+   contextUsedTokens?: number;
++  autoCompactProbe?: object;
++  autoCompactReading?: {
++    modelId: string;
++    assistantModel: string;
++    isAutoCompactEnabled?: boolean;
++    autoCompactThreshold?: number;
++  };
+   /** Whether `contextWindowSize` came from an authoritative source (the
+    *  cross-session cache, a `result.modelUsage`, or the background
+    *  `getContextUsage`) rather than the text heuristic / default. Guards the
+@@ -5147,6 +5154,8 @@ export class ClaudeAcpAgent {
+       update: T,
+     ): T => {
+       const estimated = !session.contextWindowAuthoritative;
++      const reading = session.autoCompactReading;
++      const autoCompact = reading?.assistantModel === lastAssistantModel ? reading : undefined;
+       if (!lastAssistantModel && !estimated) return update;
+       return {
+         ...update,
+@@ -5154,6 +5163,13 @@ export class ClaudeAcpAgent {
+           ...(update._meta ?? {}),
+           ...(lastAssistantModel ? { "_claude/model": lastAssistantModel } : {}),
+           ...(estimated ? { "_claude/contextWindowEstimated": true } : {}),
++          ...(autoCompact && {
++            "_claude/autoCompact": {
++              modelId: autoCompact.modelId,
++              isAutoCompactEnabled: autoCompact.isAutoCompactEnabled,
++              autoCompactThreshold: autoCompact.autoCompactThreshold,
++            },
++          }),
+         },
+       };
+     };
+@@ -7555,21 +7571,48 @@ export class ClaudeAcpAgent {
+               this.sessionIndex.onOwnSessionChanged(params.sessionId);
+               // Send usage_update notification
+               if (lastAssistantTotalUsage !== null) {
+-                await sendUpdate({
+-                  sessionId: params.sessionId,
+-                  update: attachUsageModel({
+-                    sessionUpdate: "usage_update",
+-                    used: lastAssistantTotalUsage,
+-                    size: session.contextWindowSize,
+-                    cost: {
+-                      amount: message.total_cost_usd,
+-                      currency: "USD",
+-                    },
+-                    ...(message.origin && {
+-                      _meta: { "_claude/origin": message.origin },
+-                    }),
+-                  }),
+-                });
++                const usageUpdate = {
++                  sessionUpdate: "usage_update" as const,
++                  used: lastAssistantTotalUsage,
++                  size: session.contextWindowSize,
++                  cost: { amount: message.total_cost_usd, currency: "USD" },
++                  ...(message.origin && { _meta: { "_claude/origin": message.origin } }),
++                };
++                await sendUpdate({ sessionId: params.sessionId, update: attachUsageModel(usageUpdate) });
++                const { query } = session;
++                const assistantModel = lastAssistantModel;
++                if (
++                  !message.is_error && message.session_id === params.sessionId &&
++                  assistantModel && typeof query.getContextUsage === "function"
++                ) {
++                  const modelId = session.models.currentModelId;
++                  const probe = (session.autoCompactProbe = {});
++                  // Keep the result and turn completion independent of this local SDK read.
++                  void (async () => {
++                    let usage: Awaited<ReturnType<Query["getContextUsage"]>> | undefined;
++                    try {
++                      usage = await query.getContextUsage({ detail: "summary" });
++                    } catch (error) {
++                      this.logger.error("Failed to read automatic compaction:", error);
++                    }
++                    if (
++                      this.sessions[params.sessionId] !== session ||
++                      session.query !== query ||
++                      session.autoCompactProbe !== probe ||
++                      lastAssistantModel !== assistantModel ||
++                      lastAssistantTotalUsage !== usageUpdate.used
++                    ) return;
++                    const reading = usage && [assistantModel, matchingModelUsage?.key, modelId].includes(usage.model)
++                      ? usage : undefined;
++                    session.autoCompactReading = {
++                      modelId,
++                      assistantModel,
++                      isAutoCompactEnabled: reading?.isAutoCompactEnabled,
++                      autoCompactThreshold: reading?.autoCompactThreshold,
++                    };
++                    await sendUpdate({ sessionId: params.sessionId, update: attachUsageModel(usageUpdate) });
++                  })().catch((error) => this.logger.error("Failed to send automatic compaction usage:", error));
++                }
+               }
+ 
+               // A model cycle that Claude Code started on its own ends at its
+@@ -8923,6 +8966,8 @@ export class ClaudeAcpAgent {
+             // The follow-up prompt was predicted from the transcript the reset
+             // dropped, so it no longer follows from anything.
+             await this.publishPromptSuggestion(params.sessionId, null);
++            session.autoCompactProbe = undefined;
++            session.autoCompactReading = undefined;
+             // The recorded request and TTL describe the dropped conversation.
+             session.idleCompaction?.reset();
+             break;
+@@ -11706,6 +11751,8 @@ export class ClaudeAcpAgent {
+       const newModelInfo = session.modelInfos.find((m) => m.value === value);
+       const modelChanged = session.models.currentModelId !== value;
+       if (modelChanged) {
++        session.autoCompactProbe = undefined;
++        session.autoCompactReading = undefined;
+         session.idleCompaction?.disarm("model change");
+         // Seed the new model's context window WITHOUT awaited IPC on the
+         // switch path: cached authoritative value if we've already learned it
+diff --git a/src/tests/acp-agent.test.ts b/src/tests/acp-agent.test.ts
+index 872263a..4e59c39 100644
+--- a/src/tests/acp-agent.test.ts
++++ b/src/tests/acp-agent.test.ts
+@@ -15758,6 +15758,42 @@ describe("usage_update computation", () => {
+     });
+   }
+ 
++  it.each([
++    { enabled: true, threshold: 167_000, reportModel: "probe-model", expected: true },
++    { enabled: false, threshold: 167_000, reportModel: "probe-model", expected: true },
++    { enabled: true, threshold: undefined, reportModel: "probe-model", expected: true },
++    { enabled: true, threshold: 167_000, reportModel: "different-model", expected: false },
++  ])("reports the observed automatic compaction settings: %j", async ({ enabled, threshold, reportModel, expected }) => {
++    const { agent, updates } = createMockAgentWithCapture();
++    injectSession(agent, [
++      createAssistantMessage({ model: "probe-model" }),
++      createResultMessageWithModel({ modelUsage: {} }),
++      { type: "system", subtype: "session_state_changed", state: "idle" },
++    ]);
++    const session = agent.sessions["test-session"]!;
++    const getContextUsage = vi.fn(async () => ({
++      model: reportModel,
++      isAutoCompactEnabled: enabled,
++      autoCompactThreshold: threshold,
++    }));
++    Object.assign(session.query, { getContextUsage });
++    session.models = { ...session.models, currentModelId: "probe-alias" };
++
++    await agent.prompt({ sessionId: "test-session", prompt: [{ type: "text", text: "go" }] });
++
++    expect(getContextUsage).toHaveBeenCalledExactlyOnceWith({ detail: "summary" });
++    const samples = updates.flatMap((notification) => {
++      const update = notification.update;
++      const sample = update?._meta?.["_claude/autoCompact"];
++      return update?.sessionUpdate === "usage_update" && sample ? [sample] : [];
++    });
++    expect(samples).toEqual([{
++      modelId: "probe-alias",
++      isAutoCompactEnabled: expected ? enabled : undefined,
++      autoCompactThreshold: expected ? threshold : undefined,
++    }]);
++  });
++
+   it("used sums all token types as post-turn context occupancy proxy", async () => {
+     const { agent, updates } = createMockAgentWithCapture();
+     injectSession(agent, [
+-- 
+2.43.0
+
