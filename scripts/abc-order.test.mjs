@@ -26,6 +26,7 @@ for (const [mode, expected] of [['held', 1], ['independent-slow', 0]]) {
     assert.equal(result.code, expected)
     const verdict = JSON.parse(result.stdout.trim().split('\n').at(-1))
     assert.equal(verdict.verdict, expected ? 'FAIL' : 'PASS')
+    assert.deepEqual(verdict.results.AProgress, { promptAcknowledged: true, idleObserved: true })
     if (expected) assert.equal(verdict.step, 'B/held-for-subagent')
     else assert.ok(verdict.results.BOrder.parentEnd.order < verdict.results.BOrder.childComplete.order)
   })

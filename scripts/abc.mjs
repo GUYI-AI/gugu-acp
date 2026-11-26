@@ -82,9 +82,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const TIMEOUT = Symbol('timeout')
 const withTimeout = (p, ms) => Promise.race([p, sleep(ms).then(() => TIMEOUT)])
 /** A prompt's turn: answered when Claude Code takes the prompt in, ended at the session's next idle. */
-const prompt = async (sid, text) => {
+const prompt = async (sid, text, progress) => {
   const idle = nextIdle(sid)
+  if (progress) void idle.then(() => { progress.idleObserved = true })
   await call('session/prompt', { sessionId: sid, prompt: [{ type: 'text', text }] })
+  if (progress) progress.promptAcknowledged = true
   return idle
 }
 const ended = (r) => r !== TIMEOUT && r?.stopReason === 'end_turn'
@@ -101,7 +103,8 @@ try {
 log('session', sid, cliVersion)
 
 try {
-  const a = await withTimeout(prompt(sid, 'Reply with just: hi'), 120_000)
+  results.AProgress = { promptAcknowledged: false, idleObserved: false }
+  const a = await withTimeout(prompt(sid, 'Reply with just: hi', results.AProgress), 120_000)
   results.A = a === TIMEOUT ? 'timeout' : a.stopReason; log('A', results.A)
   if (!ended(a)) verdict('FAIL', { step: 'A' })
   await sleep(4000)

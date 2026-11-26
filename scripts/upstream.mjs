@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parseTagVersion, stableReleaseTags } from './upstream-tags.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const [bridgeName, flag] = process.argv.slice(2)
@@ -18,20 +19,15 @@ if (!bridgeName) { console.error('usage: upstream.mjs <bridge> [--bump]'); proce
 const file = join(ROOT, 'bridges', bridgeName, 'bridge.json')
 const bridge = JSON.parse(readFileSync(file, 'utf8'))
 
-// [major, minor, patch, 1 for a release or 0 for a pre-release]
-const parse = (tag) => { const m = /^v?(\d+)\.(\d+)\.(\d+)(-[\w.]+)?$/.exec(tag); return m ? [...m.slice(1, 4).map(Number), m[4] ? 0 : 1] : null }
 const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3]
 
-const refs = execFileSync('git', ['ls-remote', '--tags', '--refs', bridge.upstream.repo], { encoding: 'utf8' })
-const tags = refs.split('\n').filter(Boolean).map((line) => {
-  const [commit, ref] = line.split('\t')
-  return { commit, tag: ref.replace('refs/tags/', '') }
-}).filter((t) => parse(t.tag)?.[3] === 1)
+const refs = execFileSync('git', ['ls-remote', '--tags', bridge.upstream.repo], { encoding: 'utf8' })
+const tags = stableReleaseTags(refs)
 if (tags.length === 0) { console.error(`FAIL step=ls-remote: no vX.Y.Z tags at ${bridge.upstream.repo}`); process.exit(1) }
-tags.sort((a, b) => cmp(parse(a.tag), parse(b.tag)))
+tags.sort((a, b) => cmp(parseTagVersion(a.tag), parseTagVersion(b.tag)))
 const latest = tags.at(-1)
 const current = bridge.upstream.tag
-const newer = cmp(parse(latest.tag), parse(current)) > 0
+const newer = cmp(parseTagVersion(latest.tag), parseTagVersion(current)) > 0
 
 if (newer && flag === '--bump') {
   const [maj, min] = bridge.version.split('.').map(Number)
