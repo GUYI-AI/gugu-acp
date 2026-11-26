@@ -22,11 +22,17 @@ const bridge = JSON.parse(readFileSync(file, 'utf8'))
 const parse = (tag) => { const m = /^v?(\d+)\.(\d+)\.(\d+)(-[\w.]+)?$/.exec(tag); return m ? [...m.slice(1, 4).map(Number), m[4] ? 0 : 1] : null }
 const cmp = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2] || a[3] - b[3]
 
-const refs = execFileSync('git', ['ls-remote', '--tags', '--refs', bridge.upstream.repo], { encoding: 'utf8' })
-const tags = refs.split('\n').filter(Boolean).map((line) => {
-  const [commit, ref] = line.split('\t')
-  return { commit, tag: ref.replace('refs/tags/', '') }
-}).filter((t) => parse(t.tag)?.[3] === 1)
+// Annotated tags have an object ID and a peeled commit ID. Pin the commit that
+// build.mjs will compare with the cloned HEAD. Lightweight tags point there directly.
+const refs = execFileSync('git', ['ls-remote', '--tags', bridge.upstream.repo], { encoding: 'utf8' })
+const tagRefs = new Map(refs.trim().split('\n').filter(Boolean).map((line) => {
+  const [object, ref] = line.split('\t')
+  return [ref, object]
+}))
+const tags = [...tagRefs].map(([ref, object]) => ({
+  commit: tagRefs.get(ref + '^{}') ?? object,
+  tag: ref.replace('refs/tags/', ''),
+})).filter((t) => parse(t.tag)?.[3] === 1)
 if (tags.length === 0) { console.error(`FAIL step=ls-remote: no vX.Y.Z tags at ${bridge.upstream.repo}`); process.exit(1) }
 tags.sort((a, b) => cmp(parse(a.tag), parse(b.tag)))
 const latest = tags.at(-1)
